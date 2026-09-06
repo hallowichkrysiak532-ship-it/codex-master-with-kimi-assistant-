@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors and local environment
+.vscode/
+.idea/
+.env
+.env.*
+
+# Agent runtime data may contain prompts and local paths
+.agent_runtime/tasks/*
+.agent_runtime/results/*
+.agent_runtime/logs/*
+.agent_runtime/ledger.csv
+
+# Workspace inputs and generated outputs are local by default
+workspace/papers/*
+workspace/repos/*
+workspace/notes/*
+outputs/reports/*
+outputs/summaries/*

@@ -1,0 +1,49 @@
+# Bounded Kimi coder task: Gaussian copula correlation primitives
+
+## Exact question
+
+Implement one standalone numerical module for fitting and scoring shrinkage Gaussian-copula correlation models. The main agent will own all dataset I/O, split logic, scientific comparisons, D_relation alignment, artifact freezing, and interpretation.
+
+## Isolated workspace and allowed files
+
+Work only inside the provided isolated workspace. Create exactly:
+
+- `gaussian_copula_models.py`
+- `test_gaussian_copula_models.py`
+
+Do not read or assume project files. Do not run commands. Use only NumPy and scikit-learn. No I/O, plotting, global mutable state, or randomness.
+
+## Required public API
+
+```python
+fit_shrunk_correlation(z) -> np.ndarray
+gaussian_copula_log_density(z, correlation) -> np.ndarray
+blend_correlations(shared, specific, alpha) -> np.ndarray
+select_global_blend_alpha(shared, specific_by_source, validation_by_source, alpha_grid) -> tuple[float, dict]
+```
+
+Requirements:
+
+1. Inputs `z` are finite 2D normal-score arrays with at least four rows and at least two columns.
+2. `fit_shrunk_correlation` fits `sklearn.covariance.LedoitWolf(assume_centered=False)` and converts its covariance to a symmetric correlation matrix with exact unit diagonal. Reject zero/nonfinite variances. The returned matrix must be strictly positive definite.
+3. `gaussian_copula_log_density` returns one value per row using
+   `-.5*logdet(R) - .5*z@(inv(R)-I)@z`, implemented with stable linear algebra rather than an explicit inverse. Validate finite, symmetric, unit-diagonal, strictly positive-definite `R`, and matching dimensions.
+4. `blend_correlations` returns `(1-alpha)*shared + alpha*specific`; validate `alpha in [0,1]` and both matrices as correlations. Symmetrize numerical noise, set the diagonal exactly to one, and require positive definiteness.
+5. `select_global_blend_alpha` accepts source-keyed fitted specific matrices and validation normal-score arrays. All keys and dimensions must match. For each alpha, blend each source matrix with the shared matrix and compute the sample-weighted mean validation log density across sources. Return the alpha with the largest score; ties choose the smaller alpha. The diagnostic dict must include the ordered alpha grid, mean score for every alpha, total validation rows, and selected score. Reject an empty, duplicated, unsorted, nonfinite, or out-of-range grid.
+6. Never clip eigenvalues, silently add jitter, or mutate inputs.
+
+## Focused tests
+
+Tests must cover:
+
+- fitted matrix symmetry, unit diagonal and positive definiteness;
+- identity-correlation log density equals zero;
+- agreement with a direct small-matrix formula;
+- blend endpoints and invalid alpha;
+- alpha selector key/dimension/grid validation and deterministic tie handling;
+- a deterministic synthetic case where source-specific dependence selects a nonzero alpha;
+- nonfinite, constant-column, nonsymmetric, non-unit-diagonal and non-PD failures.
+
+## Acceptance and handoff
+
+The main agent will run the tests externally and review all lines. Return a handoff of at most 1500 characters listing files, API decisions, tests written, and any unresolved limitation. Do not claim that tests were run.

@@ -1,0 +1,122 @@
+version: 2
+scope: guidance_for_main_agent_not_automatic_scheduler
+objective: reduce_main_agent_work_after_specification_review_and_repair
+limits:
+  max_calls_per_user_request: 3
+  includes_correction_calls: true
+  # coder + tester loops may exceed the normal budget; the extra calls stay
+  # on the Kimi side and must not add main-agent turns
+  code_task_calls_with_test_loop: 5
+  target_handoff_chars: 1500
+  max_return_chars: 4000
+  default_process_deadline_seconds: 3600
+  diagnostic_min_interval_seconds: 300
+delegate_when:
+- long documents and evidence extraction
+- repository/log inspection and comparisons
+- broad primary-source discovery
+- plumbing and artifact code whose acceptance is mechanical (tests, schemas)
+- a bounded module or mechanical change saves more work than review costs
+keep_with_main_agent_when:
+- intent and short local changes
+- scientific validity and architecture
+- statistical or algorithmic cores whose spec would need formulas
+- conflicting evidence and critical verification
+- acceptance and synthesis
+- delegation would require reconstructing an entire pipeline
+routing:
+  reader:
+    use_for:
+    - long documents
+    - structured summaries
+    - evidence extraction
+  worker:
+    use_for:
+    - repository/log inspection
+    - comparisons
+    - repetitive extraction
+  researcher:
+    use_for:
+    - literature discovery
+    - primary-source comparison
+  coder:
+    use_for:
+    - one bounded function/module with focused tests
+    - small mechanical changes
+    requires_workspace: true
+    can_write: true
+    can_run_commands: false
+  tester:
+    use_for:
+    - running focused tests and verification commands
+    - closing the coder test loop before main-agent review
+    requires_workspace: true
+    can_write: false
+    can_run_commands: true
+task_contract:
+  required:
+  - question_or_deliverable
+  - input_paths
+  - allowed_workspace
+  - acceptance_checks
+  - handoff_limit
+  - deadline
+  code_additions:
+  - allowed_files
+  - interfaces_and_invariants
+  pass_paths_not_corpus: true
+  read_before_delegating: only_enough_to_scope
+  shared_conventions_file: CONVENTIONS.md
+waiting:
+  slow_or_silent_is_failure: false
+  absent_files_is_failure: false
+  duplicate_worker_or_implementation_while_running: forbidden
+  preferred_method: completion_notification_or_background_wait
+  host_responsiveness_and_wait_limits_take_precedence: true
+  user_update_requires_log_read: false
+  independent_work: already_required_and_not_owned_by_worker
+  fill_waiting_with_extra_scope: false
+  larger_deadline: configure_before_launch_never_shorten_due_to_silence
+takeover:
+  valid_triggers:
+  - actual_worker_failure
+  - unrecoverable_tool_or_auth_error
+  - configured_deadline_expired
+  - explicit_user_cancellation_or_deadline_change
+  require_worker_and_relevant_children_stopped: true
+  inspect_saved_result_and_manifest_first: true
+  display_or_encoding_error_after_completion: recover_saved_result_do_not_rerun_model
+review:
+  read_handoff_first: true
+  verify_important_evidence: true
+  code:
+  - inspect_full_change_manifest
+  - review_changed_code
+  - run_focused_tests
+  reread_untouched_files_or_entire_corpus: avoid
+  localized_failure: one_focused_correction_in_same_workspace_within_call_budget
+  invalidated_approach: main_agent_decides_and_records_reason
+handoff_required_sections:
+- Conclusion
+- Key Findings
+- Evidence
+- Uncertainties
+- Recommended Verification
+coder_handoff_required_sections:
+- Conclusion
+- Changed Files
+- Key Decisions
+- Tests
+- Risks
+- Recommended Verification
+tester_handoff_required_sections:
+- Conclusion
+- Commands
+- Results
+- Failures
+- Recommended Verification
+cost:
+  repeat_setup_audit_without_change: false
+  full_source_or_trace_in_handoff: false
+  record_outcome: accepted_reworked_or_not_used_via_record_outcome_flag
+  claim_savings_without_usage_evidence: false

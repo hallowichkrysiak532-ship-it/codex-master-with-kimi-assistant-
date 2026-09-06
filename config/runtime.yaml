@@ -1,0 +1,23 @@
+kimi:
+  executable: kimi
+  model: kimi-code/k3
+  thinking_effort: max
+  timeout_seconds: 3600
+  max_output_chars: 4000
+  default_agent: worker
+  writable_agents:
+  - coder
+  - tester
+agents:
+  worker: agents/kimi-worker.md
+  reader: agents/kimi-reader.md
+  researcher: agents/kimi-researcher.md
+  coder: agents/kimi-coder.md
+  tester: agents/kimi-tester.md
+paths:
+  workspace_root: workspace
+  tasks: .agent_runtime/tasks
+  results: .agent_runtime/results
+  logs: .agent_runtime/logs
+  ledger: .agent_runtime/ledger.csv
+  conventions: CONVENTIONS.md
