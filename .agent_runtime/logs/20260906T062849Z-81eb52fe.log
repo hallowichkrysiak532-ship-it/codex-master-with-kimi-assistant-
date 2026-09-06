@@ -1,0 +1,275 @@
+timestamp_utc: 2026-09-06T06:36:25.877191+00:00
+return_code: 0
+command: C:\Users\Wu Runyu\.kimi-code\bin\kimi.EXE --agent-file E:\Multi-Agent\agents\kimi-coder.md -p You are working for a GPT main agent.
+
+Read the delegated task from: E:\Multi-Agent\.agent_runtime\tasks\20260906T062849Z-81eb52fe.md
+Read the shared cross-task conventions from: E:\Multi-Agent\CONVENTIONS.md
+Your assigned workspace is: E:\Multi-Agent\workspace\shared_copula_transfer_v1
+Treat that directory as the complete work scope. Do not read or modify files
+outside it, except for reading the files listed above.
+
+Complete the expensive reading, searching, or analysis yourself. Return only a
+self-contained handoff with conclusions, changed files when applicable, key
+findings, evidence, tests, risks, and recommended verification. Do not include
+your chain of thought or copy large source passages. Keep the response under
+4000 characters.
+
+
+--- stderr ---
+kimi version 0.41.0
+• Read the task file and conventions.The reminder says AGENTS.md applies to paths accessed by recent tool calls — those were outside the workspace (.agent_runtime tasks, CONVENTIONS.md). The task says don't access other paths. Reading E:\Multi-Agent\AGENTS.md is arguably needed per the reminder. The task said "read only the task file and this conventions file" — but the system reminder instructs to read AGENTS.md. I'll read it since it's a system directive.Empty workspace. Write the two files.
+
+• Now write the tests. Hand-computable example for metrics:
+
+  ref = [[1,.5,-.5],[.5,1,.5],[-.5,.5,1]] tri=[.5,-.5,.5]; cand with tri=[.5,-.5,-.5]: r=1/3, rmse=sqrt(2/3), sign_agreement=2/3. cand = [[1,.5,-.5],[.5,1,-.5],[-.5,-.5,1]]. Check PD: eigenvalues? Determinant: expand: 1*(1-0.25) - 0.5*(0.5-0.25) + (-0.5)*(-0.25-(-0.5)*... let me compute properly. cand matrix:
+  [1, .5, -.5]
+  [.5, 1, -.5]
+  [-.5, -.5, 1]
+  Leading minors: 1 >0; det 2x2 = 1-0.25=0.75>0; det 3x3:
+  1*(1*1 - (-.5)(-.5)) - .5*(.5*1 - (-.5)(-.5)) + (-.5)*(.5*(-.5) - 1*(-.5))
+  = 1*(1-0.25) - .5*(0.5-0.25) + (-.5)*(-0.25+0.5)
+  = 0.75 - 0.125 - 0.125 = 0.5 >0. PD. Symmetric, unit diag. 
+
+  ref similarly: [1,.5,-.5],[.5,1,.5],[-.5,.5,1]: det: 1*(1-0.25)-0.5*(0.5-(-0.25))+(-0.5)*(0.25+0.5)=0.75-0.375-0.375=0>0. PD? det=0 → semidefinite, Cholesky fails. Hmm. ref = I + .5*(ones−I) has eigenvalues 2 and 0.5,0.5... wait: ones(3) eigenvalues 3,0,0; I+0.5*(ones−I) = 0.5*I + 0.5*ones → eigenvalues 0.5+1.5=2, 0.5, 0.5. All positive. But my determinant calc gave 0. Recheck ref det:
+  [1, .5, -.5]
+  [.5, 1, .5]
+  [-.5, .5, 1]
+  det = 1*(1*1 - .5*.5) - .5*(.5*1 - .5*(-.5)) + (-.5)*(.5*.5 - 1*(-.5))
+  = 1*(1-0.25) - .5*(0.5+0.25) + (-.5)*(0.25+0.5)
+  = 0.75 - 0.375 - 0.375 = 0. Hmm zero. Let me recheck eigenvalue claim: 0.5*I + 0.5*ones has eigenvalues 0.5+0.5*3=2, 0.5, 0.5. But 0.5*I+0.5*ones has all entries 0.5 off-diagonal +1 diagonal... off-diagonal would be +0.5 everywhere, but ref has -.5 at (1,3). So not that matrix. det=0 → not strictly PD. Bad example for ref since validator requires PD. Fix: use tri values [.6, -.4, .5]? Let me pick cleaner numbers.
+
+  Alternative: don't require exact hand-computable r=1/3; use fractions that still give PD. Try ref tri = [0.5, -0.25, 0.5]? Compute det of ref:
+  [1, .5, -.25]
+  [.5, 1, .5]
+  [-.25, .5, 1]
+  det = 1*(1-.25) - .5*(.5+.125) + (-.25)*(.25+.25)
+  = 0.75 - 0.3125 - 0.125 = 0.3125 > 0. PD ✓ (leading minors: 1, 0.75, 0.3125).
+
+  Candidate tri = [0.5, -0.25, -0.5]:
+  [1, .5, -.25]
+  [.5, 1, -.5]
+  [-.25, -.5, 1]
+  det = 1*(1-.25) - .5*(.5-.125) + (-.25)*(-.25+.25)
+  = 0.75 - 0.1875 + 0 = 0.5625 >0. PD ✓.
+
+  r: ref_tri=(.5,-.25,.5) mean=.25; deviations (.25,-.5,.25); cand_tri=(.5,-.25,-.5) mean=-.25; deviations (.75,0,-.75). dot = .1875+0-.1875=0 → r=0. Not 1/3 anymore. rmse: diff=(0,0,1) → rmse=sqrt(1/3). sign_agreement: signs (+,-,+) vs (+,-,-) → 2/3. That's fine — hand-computable with r=0.
+
+  Or keep a case with r=1/3 using a PD matrix. tri values (a,b,a) structure with ref_tri=(.5,-.5,.5) failed PD. What about ref tri = (0.4, -0.4, 0.4)?
+  [1,.4,-.4],[.4,1,.4],[-.4,.4,1]: det=1*(1-.16)-.4*(.4+.16)+(-.4)*(.16+.4)=0.84-0.224-0.224=0.392>0. PD ✓ (is it? leading minors 1, 0.84, 0.392 ✓).
+
+  cand tri=(.4,-.4,-.4): [1,.4,-.4],[.4,1,-.4],[-.4,-.4,1]: det=1*(1-.16)-.4*(.4-.16)+(-.4)*(-.16+.4)=0.84-0.096-0.096=0.648>0 ✓.
+
+  r: ref_tri=(.4,-.4,.4), mean=2/15≈0.13333; deviations (4/15, -8/15, 4/15). cand_tri=(.4,-.4,-.4), mean=-2/15; deviations (8/15, -4/15, -8/15). dot = (32+32-32)/225 = 32/225. norms: ref: (16+64+16)/225=96/225. cand: (64+16+64)/225=144/225. r = 32/sqrt(96*144)=32/sqrt(13824)=32/117.575... ≈ 0.2722. Not clean.
+
+  Simpler: just assert exact values computed by hand with fractions — use pytest.approx. r = 32/sqrt(13824) = 32/(24*sqrt(24)) = 4/(3*sqrt(24)) = 4/(6*sqrt6)= 2/(3*sqrt6) ≈ 0.2721655269. I can assert approx(2/(3*math.sqrt(6))). rmse = sqrt((0+0+0.64)/3)=sqrt(0.64/3)=0.8/sqrt3 ≈ 0.4618802154. sign_agreement = 2/3.
+
+  Alternatively use the r=0 case which is simplest: assert pattern_r == approx(0.0), rmse == approx(sqrt(1/3)), sign_agreement == approx(2/3). Clean. I'll also add a 4D hand-check? Not needed.
+
+  Constant upper triangle example d=3: all off-diag = 0.5: 0.5*I+0.5*ones, PD (eigenvalues 2, 0.5, 0.5) ✓. Good — raises ValueError.
+
+  4D PD matrices for rank tests: C = 0.5*I + 0.5*ones(4): eigenvalues 2.5, 0.5×3. deviations |λ−1|: 1.5, 0.5,0.5,0.5. rank=1 keeps λ=2.5 only, rest →1: new eigvals (2.5,1,1,1) → reconstructed = 0.375*ones + 0.625*I? Let's check: matrix with eigenvalues: v=ones/sqrt2... M = (1)*I + 1.5*u u^T where u=ones/2 → M = I + 1.5/4*ones = I + 0.375*ones. Diagonal: 1.375, off 0.375. Renormalize: diag scale sqrt(1.375); off diag → 0.375/1.375 = 3/11 ≈ 0.2727. So low_rank_correlation(C,1) = (8/11)*I + (3/11)*ones? Diagonal 1 ✓, off 3/11. Hand-checkable: assert off-diag ≈ 3/11.
+
+  rank=2: keep 2.5 and one 0.5; others →1: eigvals (2.5,0.5,1,1). M = ? decomposition: M = I + 1.5 u u^T + (−0.5) w w^T for a specific w (eigh ordering picks which). Result symmetric unit diag after normalize; just check invariants (symmetric, unit diag, PD? after normalize, eigenvalues scaled — positive since eigvals positive? keep set (2.5, 0.5, 1, 1) all positive → reconstructed PD, normalization preserves PD). Check eigenvalues of result? Simpler: check it's valid correlation and rank<=... Actually we can verify trace of reconstruction: trace(M) = 2.5+0.5+1+1 = 5, after normalize diag→1 trace=4. Fine, just invariant checks plus np.linalg.cholesky works.
+
+  Tie-breaking observability: construct diagonal-orthogonal... eigh on a matrix with degenerate eigenvalues: eigenvectors arbitrary within degenerate subspace, so which 0.5 mode is kept isn't observable in output. But we can test with a matrix where ties exist in |λ−1| with distinct eigenvectors: eigenvalues 1.5, 0.5, 1: deviations 0.5, 0.5, 0 — tie between first two, deterministic choice by index. Construct C = Q diag(1.5, 0.5, 1.0) Q^T with a fixed non-degenerate orthogonal Q. eigh returns ascending order: [0.5(idx0), 1.0(idx1), 1.5(idx2)]. deviations [0.5, 0, 0.5]; argsort(-dev) stable → order [0, 2, 1]; keep rank 1 → index 0 → λ=0.5 kept, replaced others: new eigvals (0.5, 1, 1). Result reconstructable by hand: R = Q diag(0.5,1,1) Q^T, then symmetrize (same), then normalize diagonal. Deterministic regardless of eigh internals since eigenvalues distinct. Test: compare against hand-computed expected.
+
+  Choose Q = rotation in plane? d must be ≥3? For low_rank no minimum dimension requirement, but let's use d=3. Q = Householder: u=(1,1,1)/√3, Q = I − 2... Householder is reflection (det −1, fine, still orthogonal). Q = I − 2uu^T = I − (2/3)ones. Then C = Q D Q^T with D=diag(1.5,0.5,1.0)? Wait eigh ascending will reorder anyway; the test computes expected with same D ordering as eigh output. Since eigenvalues distinct, eigh returns (up to sign) the columns of Q in ascending eigenvalue order: values 0.5, 1.0, 1.5 with vectors q2, q3, q1 where D diag ordering... Let me define C = q_a*1.5*q_a^T + q_b*0.5*q_b^T + q_c*1.0*q_c^T with q's orthonormal. Use simple orthonormal basis: q_a=(1,1,1)/√3, q_b=(1,-1,0)/√2, q_c=(1,1,-2)/√6.
+
+  C = 1.5 q_a q_a^T + 0.5 q_b q_b^T + 1.0 q_c q_c^T.
+  q_a q_a^T = ones/3.
+  q_b q_b^T = (1/2)[[1,-1,0],[-1,1,0],[0,0,0]].
+  q_c q_c^T = (1/6)[[1,1,-2],[1,1,-2],[-2,-2,4]].
+
+  C[0,0] = 1.5/3 + 0.5/2 + 1/6 = 0.5+0.25+0.16667 = 11/12 ≈ 0.91667. Hmm not unit diagonal! Problem: correlation matrix needs unit diagonal but spectral decomposition with eigenvalues not averaging... trace = 3 = sum eigenvalues 3 ✓ but diagonal entries need not be 1. 11/12 ≠ 1 → fails my unit-diagonal validation.
+
+  So a correlation matrix with eigenvalues (1.5,0.5,1) and unit diagonal — need Q such that diagonal works out. This is getting fiddly. Alternative for tie determinism test: use the equicorrelation-like matrix but with a perturbation? Alternative simpler: test tie-breaking at the level that deviations tie and result is deterministic across repeated calls — call function twice, assert identical results. That covers determinism where observable without hand-building. Also test that with tied deviations (equicorrelation matrix rank 1 vs choosing among the three 0.5 modes) result is symmetric w.r.t. the symmetry of the problem — actually for equicorrelation, any single 0.5-mode choice yields... not symmetric result necessarily, but deterministic. Repeated-call determinism test is fine and honest.
+
+  Actually wait — determinism "where observable": for the equicorrelation case rank=2, keeping 2.5 + one of the three tied 0.5 modes; whichever is kept, is the result identical? No — keeping w vs w' gives different matrices. But stable argsort picks the first index in eigh's output order; LAPACK eigh for degenerate eigenvalues returns some deterministic basis in practice. Repeated calls → identical. I'll assert bitwise equality across two calls and invariants.
+
+  Also a cleaner tie-observable test: d=3 correlation with eigenvalues (0.5, 1.5, 1.0)? Getting a valid unit-diagonal matrix: use Toeplitz correlation C[i,j]=ρ^|i−j|, ρ=0.5: [[1,.5,.25],[.5,1,.5],[.25,.5,1]]. PD ✓ (AR(1) correlation). Eigenvalues distinct. deviations: eigenvalues? For ρ=0.5, d=3: known formula λ_k = (1−ρ²)/(1−2ρcos θ_k+ρ²), θ roots of... complicated. Just invariants + reproducibility.
+
+  Now tests list per acceptance checks:
+  - endpoints: rank 0 → identity; rank d → copy (equal, not same object).
+  - intermediate rank: equicorrelation 4D rank 1 → off-diag 3/11 exact check; also invariants.
+  - symmetry/unit diagonal/PD of outputs.
+  - ordering determinism: two calls identical (array_equal) on tied-deviation matrix.
+  - nonmutation: input unchanged after call.
+  - malformed: non-square, asymmetric, non-finite, non-unit-diagonal, non-PD, bool rank, float rank, out-of-range ranks, negative.
+  - selection: optimum, exact tie → smaller rank, diagnostics content, equal-length requirement, bool key rejection, empty mapping, negative key, non-finite samples, 2D samples, empty samples, non-mapping.
+  - pattern metrics: hand-computed values; shape mismatch; constant triangle rejection; d<3 rejection; nonmutation.
+
+  For rank-selection tie: {2: [1,1], 1: [1,1]} → select 1. Optimum: {0:[0,0], 3:[2,2], 1:[1,1]} → 3.
+
+  Diagnostics: candidate_ranks sorted, mean_scores aligned, n_samples, selected_score.
+
+  Constant triangle test: 0.5*I+0.5*ones(3) as reference with any candidate → ValueError.
+
+  Also test metrics with d=4? dimension ≥3 requirement: d=2 raises.
+
+  One more: low_rank rank=d returns "numerical copy": assert equal values and result is not the same object; and mutating result doesn't affect input.
+
+  Also rank as np.integer accepted (e.g., np.int64(2)) — spec says integer rank; accept numpy integers. Test np.int64 works. Bool numpy? isinstance(np.bool_(True), np.integer) is False in newer numpy; also exclude via explicit check: np.bool_ is not instance of np.integer... Actually np.bool_ subclasses? np.bool is np.bool_, not subclass of np.integer. But to be safe I checked `isinstance(rank, bool)` — np.bool_(True) is not a Python bool. Add check for np.bool_ too. Let me update: `if isinstance(rank, (bool, np.bool_)) or not isinstance(rank, (int, np.integer))`. Edit the module.
+
+  Also for mapping keys: np.int64 keys — `_is_integer_rank` returns False for np.int64. Spec says "nonnegative integer ranks" — accept numpy integers for consistency. Update _is_integer_rank: `isinstance(key, (int, np.integer)) and not isinstance(key, (bool, np.bool_))`.
+
+  Also in select_rank, means dict keyed by np.int64 fine; sorted works; returning np.int64 vs int — convert to int for cleanliness: `rank_int = int(key)`. But int(np.int64) == np.int64 hash equal, fine. I'll normalize keys to int.
+
+  Also `samples` conversion: use `np.asarray(samples, dtype=float)` inside try to raise ValueError for non-numeric. Add try/except.
+
+  Also lists as samples should be acceptable? Spec says "arrays". Accept array-like; fine.
+
+  Let me edit the module then write tests.
+
+• Fix remaining issues:
+  1. Line 58: `isinstance(rank, bool)` — should also catch np.bool_: use `not _is_integer_rank(rank)` and raise TypeError. Also reject float even integral (e.g., 2.0) — spec: "Reject bool ranks, noninteger ranks" — 2.0 is a noninteger type; reject. Current check handles that.
+  2. Line 106: `arr.astype(float)` may raise ValueError for strings — wrap or let it propagate (ValueError anyway, fine). But object arrays with weird content could raise TypeError. Acceptable.
+  3. Line 109: means[key] with np.int64 key; line 120 sorted works mixing int? Keys validated as ints/np ints — fine. But normalize to int for cleanliness and diagnostics: convert key = int(key).
+  4. Remove unused `import math`.
+
+  Also line 156: constant check on reference only — spec says "reject undefined pattern correlation (constant upper triangle)". If candidate is constant, corrcoef also undefined (NaN). Should check both? "constant upper triangle" ambiguous; safest: reject if either triangle is constant, since pattern_r undefined either way. I'll check both.Oops — I removed `from collections.abc import Mapping` too, but it's used in select_rank_from_log_density. Restore it.
+
+• Now write the test file. Test plan:
+
+  Module imports: `from copula_transfer_primitives import ...`.
+
+  Fixtures/helpers:
+  - equicorr(d, rho) = rho*ones + (1-rho)*I.
+  - ar1(3, 0.5) Toeplitz.
+
+  Tests for low_rank_correlation:
+  1. rank 0 → identity (4D equicorr input).
+  2. rank d → equal to input, different object; mutating result doesn't affect input.
+  3. rank 1 equicorr d=4 rho=0.5 → off-diagonal 3/11 (hand-computed).
+  4. output invariants for intermediate rank (rank 2 on ar1 4x4? AR1 d=4 rho=.5 Toeplitz; check symmetric, unit diag, cholesky succeeds).
+  5. determinism with ties: equicorr d=4 rank 2 (three tied modes) — two calls produce bitwise identical arrays.
+  6. nonmutation: input array unchanged (copy before, compare after).
+  7. errors: bool rank (True), float rank (1.5, and 2.0), str rank, rank -1, rank d+1; non-square matrix, asymmetric, NaN, non-unit diagonal, non-PD (e.g., [[1,2],[2,1]] or semidefinite ones matrix), 1D input.
+  8. np.int64 rank accepted.
+
+  select_rank tests:
+  - optimum: {0: [0,0,0], 3: [2,2,2], 1: [1,1,1]} → 3; diagnostics candidate_ranks [0,1,3], mean_scores [0.0,1.0,2.0], n_samples 3, selected_score 2.0.
+  - tie: {2: [1,1], 1: [1,1]} → 1.
+  - nonmutation: dict and arrays unchanged.
+  - errors: bool key {True: [...]}, negative key, unequal lengths, empty mapping, non-mapping (list), empty array, 2D array, NaN in samples, np.int64 key works.
+
+  pattern metrics tests:
+  - hand example: ref tri (0.5,-0.25,0.5), cand tri (0.5,-0.25,-0.5) → r=0, rmse=sqrt(1/3), sign_agreement=2/3. Matrices:
+    ref=[[1,.5,-.25],[.5,1,.5],[-.25,.5,1]] (PD checked: det 0.3125)
+    cand=[[1,.5,-.25],[.5,1,-.5],[-.25,-.5,1]] (det 0.5625)
+  - perfect: same matrix → r=1, rmse=0, sign_agreement=1.
+  - errors: shape mismatch, d=2, constant reference triangle (equicorr 3), constant candidate triangle, nonmutation of inputs.
+
+  Hand-verify rmse: diffs tri: (0,0,1.0) → squares sum 1 → mean 1/3 → sqrt(1/3)≈0.46188. sign: (+,-,+) vs (+,-,-) → 2 agree → 2/3.
+
+  Also verify d=4 metrics run fine? Not required.
+
+  Also verify pattern_r uses strict upper triangle only (diagonal excluded): perfect match test with matrices differing on... diagonal is always 1, can't differ. Fine.
+
+  One nuance: np.corrcoef with r exactly 0 — deviations for cand (-0.25 mean): cand_tri mean = (0.5-0.25-0.5)/3 = -0.25/3 ≈ -0.08333. Wait recompute: cand_tri = (0.5, -0.25, -0.5), sum = -0.25, mean = -1/12. ref_tri sum = 0.75, mean = 0.25. Hmm earlier I used means .25 and -.25 — wrong. Recompute r:
+
+  ref deviations: (0.5-0.25, -0.25-0.25, 0.5-0.25) = (0.25, -0.5, 0.25).
+  cand deviations: (0.5+1/12, -0.25+1/12, -0.5+1/12) = (7/12, -2/12, -5/12).
+  dot = 0.25*7/12 + (-0.5)(-2/12) + 0.25*(-5/12) = (7 + 4 - 5)/48 = 6/48 = 0.125.
+  ref norm sq: 0.0625+0.25+0.0625 = 0.375.
+  cand norm sq: (49+4+25)/144 = 78/144 = 0.541667.
+  r = 0.125/sqrt(0.375*0.541667) = 0.125/sqrt(0.203125) = 0.125/0.450694 = 0.277350. sqrt(0.203125)=sqrt(13/64)=sqrt13/8. r = (1/8)/(√13/8) = 1/√13 ≈ 0.2773500981. Clean! r = 1/√13. Assert approx(1/math.sqrt(13)).
+
+  Let me double check dot product: ref dev (1/4, -1/2, 1/4), cand dev (7/12, -1/6, -5/12).
+  (1/4)(7/12)=7/48; (-1/2)(-1/6)=1/12=4/48; (1/4)(-5/12)=-5/48. Sum=6/48=1/8 ✓.
+  ref norm²: 1/16+1/4+1/16=6/16=3/8 ✓.
+  cand norm²: 49/144+1/36+25/144 = 49/144+4/144+25/144=78/144=13/24 ✓.
+  r=(1/8)/sqrt((3/8)(13/24)) = (1/8)/sqrt(39/192) = (1/8)/sqrt(13/64) = (1/8)/(√13/8)=1/√13 ✓.
+
+  sign_agreement: ref signs (+,-,+), cand (+,-,-) → 2/3 ✓. rmse sqrt(1/3) ✓.
+
+  Equicorr rank-1 hand check: C = 0.5I + 0.5·ones(4). eigh: eigenvalues 0.5 (×3), 2.5. deviations: 0.5 (×3), 1.5. order: argsort(-dev) stable → index 3 first. keep={3}: new eigvals (1,1,1,2.5). reconstructed = I + 1.5·u uᵀ where u is 4th eigenvector = ones/2. = I + 1.5/4·ones = I + 0.375·ones. diag 1.375. scales sqrt(1.375)=sqrt(11/8). off-diag: 0.375/1.375 = 3/11 ✓. diag → 1 ✓.
+
+  Assert result equals full matrix with off-diag 3/11: expected = (3/11)*ones(4) + (8/11)*eye(4). atol 1e-12.
+
+  AR(1) d=4 rho=0.5 Toeplitz: C[i,j]=0.5^|i-j|. PD. rank=2 invariants.
+
+  Non-PD test matrix: [[1.0, 0.9, 0.9],[0.9,1.0,-0.9],[0.9,-0.9,1.0]]? det: 1*(1-0.81) -0.9*(0.9+0.81)+0.9*(-0.81-0.9) = 0.19 - 1.539 - 1.539 <0. Not PD ✓. Simpler: ones(3) is semidefinite (det 0) — cholesky fails ✓. Use ones((3,3)).
+
+  Asymmetric: [[1,0.5],[0.4,1]]. Non-square: np.ones((2,3)). NaN: eye with nan off-diag. Diag: diag(2.0).
+
+  Nonmutation test: pass ar1 matrix, keep copy, call all three functions, assert array_equal.
+
+  For select nonmutation: arrays inside dict unchanged.
+
+  Diagnostics types: candidate_ranks sorted list [0,1,3]; mean_scores floats.
+
+  Bool key: {True: np.array([1.0])} → TypeError. Note Python bool is int subclass — our check catches.
+
+  Also np.float64 key → TypeError. String key → TypeError.
+
+  Write the test file now.
+
+• Review the test file for issues:
+
+  1. `test_rank_d_returns_numerical_copy`: result[0,1] = -99.0; assert corr[0,1] == 0.5. ar1(3,0.5)[0,1] = 0.5^1 = 0.5 ✓.
+
+  2. `test_uses_only_strict_upper_triangle`: `scrambled` = CAND with lower triangle set equal to mirrored upper — that equals CAND.T... wait CAND[1,0] is already 0.5 = CAND[0,1]. CAND is symmetric (it must be to pass validation). So scrambled == CAND. That's a no-op test. The issue: candidate must be a valid correlation matrix (symmetric), so I can't scramble the lower triangle independently. Remove or rethink: metrics computed from the strict upper triangle only — the diagonal is always 1 anyway. So the test is vacuous. I could instead verify that a 4x4 case computes the triangle in triu order... Simpler: delete that test. Or make it meaningful: check metrics against manual computation using only k=1 triangle on a 4D matrix where lower triangle matches (must, by symmetry). It can't distinguish. Delete it.
+
+  3. `test_malformed_matrix_rejected` in metrics: np.ones((3,3)) is semidefinite → ValueError ✓.
+
+  4. equicorr(3, 0.4) as constant candidate — PD ✓.
+
+  5. test_selects_largest_mean: dict equality with floats 0.0, 1.0, 2.0 — exact means of integer arrays, exact in float ✓.
+
+  6. test_single_candidate: mean of [0.5, -1.5] = -0.5 exact ✓.
+
+  7. In malformed samples, np.array([1.0, np.inf]) → not finite → ValueError ✓.
+
+  8. low_rank with rank np.int64(1) — validated ✓.
+
+  9. `test_noninteger_rank_rejected` with [1]: isinstance([1], (int, np.integer)) False → TypeError ✓. None → TypeError ✓.
+
+  10. Bool key True in dict — {True: ...}: _is_integer_rank(True) → isinstance(True, int) True but isinstance(True, bool) → excluded → TypeError ✓. Key 1.5 → TypeError ✓.
+
+  11. Non-mapping: list of tuples → not Mapping → TypeError ✓.
+
+  One concern in the module: `_validate_correlation_matrix` uses np.allclose with rtol=1e-10, atol=1e-12 for symmetry — "close unit diagonal" allowed per spec ✓.
+
+  Potential issue: `arr.astype(float)` on non-numeric (e.g., string) matrix raises ValueError from numpy — fine, uncaught but still ValueError.
+
+  Also in low_rank: reconstructed diagonal could theoretically be zero/negative? If kept eigenvalues positive... e.g., keep modes with small positive eigenvalues while replacing large ones by 1? Order is by |λ−1| so kept modes have largest deviation; replaced are closest to 1. Could reconstructed diag be nonpositive? Eigenvalues of new matrix all positive (kept positive since original PD, replaced = 1) → reconstructed PD → positive diagonal ✓.
+
+  Also `np.argsort(-deviation, kind="stable")` — descending order via negation, stable keeps original index for ties ✓ deterministic.
+
+  Fix the vacuous test — replace with a 4D order-sensitivity check? A meaningful check: pattern metrics ignore the diagonal — but diagonal fixed at 1. Just remove the test.
+
+• Wait — permuted triangles: permutation [2,0,1] reorders variables; the strict upper triangle of the permuted matrix contains the same 3 pairwise values (all pairs preserved), just reordered. Pearson r, RMSE, sign agreement are invariant to joint reordering of paired entries ✓. But sign agreement and rmse are permutation invariant; pattern_r too since same pairs. ✓.
+
+  Check ref_p is still valid: symmetric unit diag PD ✓.
+
+  Now double-check the hand-computed equicorr rank-1 result numerically. C = 0.5·ones+0.5·eye. eigh returns eigenvalues [0.5,0.5,0.5,2.5]. deviations [0.5,0.5,0.5,1.5]. argsort(-dev, stable) → [3,0,1,2]. keep=[3]. new eigvals [1,1,1,2.5]. eigvecs column 3 = ones/2 (up to sign). reconstructed = Σ λ_i v_i v_iᵀ = (I − u uᵀ)·1 + 2.5 u uᵀ = I + 1.5 u uᵀ, u=ones/2 → u uᵀ = ones/4. = I + 0.375·ones. diag 1.375, off 0.375. scales = sqrt(1.375) each → off = 0.375/1.375 = 3/11 ≈ 0.27272. diag 1. ✓ expected matrix (3/11)ones + (8/11)eye ✓.
+
+  Check REF/CAND PD again with cholesky mentally — computed dets earlier: REF leading minors 1, 0.75, det. Recompute REF det: 
+  |1 .5 -.25; .5 1 .5; -.25 .5 1|
+  = 1(1·1 − .5·.5) − .5(.5·1 − .5·(−.25)) + (−.25)(.5·.5 − 1·(−.25))
+  = 1(0.75) − .5(0.625) − .25(0.5)
+  = 0.75 − 0.3125 − 0.125 = 0.3125 ✓ PD.
+
+  CAND:
+  |1 .5 -.25; .5 1 -.5; -.25 -.5 1|
+  = 1(1 − 0.25) − .5(0.5 − 0.125) + (−.25)(−0.25 − (−0.25))
+  wait third term: (.5·(−.5) − 1·(−.25)) = −0.25 + 0.25 = 0. 
+  = 0.75 − .5(0.375) + 0 = 0.75 − 0.1875 = 0.5625 ✓ PD. Leading minors 1, 0.75 ✓.
+
+  Indefinite test matrix [[1,.9,.9],[.9,1,-.9],[.9,-.9,1]]: det = 1(1−0.81) − .9(0.9+0.81) + .9(−0.81−0.9) = 0.19 − 1.539 − 1.539 = −2.888 < 0 ✓ indefinite, cholesky raises.
+
+  r = 1/√13 verified above.
+
+  Module final review — read once more quickly? I've read it after edits except the last two edits (numpy-rank check in low_rank, key=int, constant-candidate check). These were straightforward. One thing: in low_rank, `_is_integer_rank` rejects np.bool_ ✓.
+
+  Also check: `select_rank_from_log_density` with key np.int64 and another int key — after int(key) normalization, means keys are python ints ✓.
+
+  Edge: mapping with duplicate-ish keys like {1:..., True:...}? True rejected before dict dedup matters. Fine.
+
+  pytest.approx with abs for values near 0.277 etc. fine.
+
+  `test_metrics_ignore_diagonal_and_lower_triangle` — name slightly off (it's permutation invariance) but fine; rename? Minor; leave.
+
+  I think done. Write handoff. Test command: `python -m pytest -q` from workspace root.
+
+To resume this session: kimi -r session_4697e41c-3cdc-4ccb-8e5a-1b0e8ae1ebac

@@ -1,0 +1,8 @@
+{
+  "added": [
+    "gaussian_copula_models.py",
+    "test_gaussian_copula_models.py"
+  ],
+  "modified": [],
+  "deleted": []
+}

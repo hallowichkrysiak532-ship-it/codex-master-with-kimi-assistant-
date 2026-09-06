@@ -1,0 +1,8 @@
+task_id,timestamp_utc,agent,workspace,task_chars,dry_run,duration_seconds,return_code,result_chars,truncated,added,modified,deleted,error,outcome
+20260906T044449Z-c1fda2f4,2026-09-06T04:44:49.402616+00:00,tester,E:\Multi-Agent\workspace\residual_copula_module_v1,48,True,,,,,,,,,accepted
+20260906T062849Z-81eb52fe,2026-09-06T06:28:49.117448+00:00,coder,E:\Multi-Agent\workspace\shared_copula_transfer_v1,2932,False,456.766,0,3140,False,2,0,0,,accepted
+20260906T064230Z-3520d0aa,2026-09-06T06:42:30.012805+00:00,tester,E:\Multi-Agent\workspace\shared_copula_transfer_v1,873,False,50.922,0,1560,False,0,0,0,,accepted
+20260906T071409Z-f406feb9,2026-09-06T07:14:09.683609+00:00,worker,E:\Multi-Agent,2012,False,91.828,0,3162,False,0,0,0,,accepted
+20260906T072843Z-a3523ca7,2026-09-06T07:28:43.611687+00:00,tester,E:\Multi-Agent\workspace\mode_physical_alignment_v1,1035,False,37.859,0,1411,False,8,0,0,,accepted
+20260906T073116Z-ef6bfd8e,2026-09-06T07:31:16.246389+00:00,reader,E:\Multi-Agent,13,True,,,,,,,,,
+20260906T080055Z-dda689d6,2026-09-06T08:00:55.921805+00:00,worker,E:\Multi-Agent,2130,False,303.344,0,3460,False,0,0,0,,

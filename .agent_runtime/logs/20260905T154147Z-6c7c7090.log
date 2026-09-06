@@ -1,0 +1,1259 @@
+timestamp_utc: 2026-09-05T16:01:39.118842+00:00
+return_code: 0
+command: C:\Users\Wu Runyu\.kimi-code\bin\kimi.exe --agent-file E:\Multi-Agent\agents\kimi-coder.md -p You are working for a GPT main agent.
+
+Read the delegated task from: E:\Multi-Agent\.agent_runtime\tasks\20260905T154147Z-6c7c7090.md
+Your assigned workspace is: E:\Multi-Agent\workspace\residual_location_scale_v1
+Treat that directory as the complete work scope. Do not read or modify files
+outside it, except for reading the task file above.
+
+Complete the expensive reading, searching, or analysis yourself. Return only a
+self-contained handoff with conclusions, changed files when applicable, key
+findings, evidence, tests, risks, and recommended verification. Do not include
+your chain of thought or copy large source passages. Keep the response under
+8000 characters.
+
+
+--- stderr ---
+kimi version 0.41.0
+• Let me read the task file first.Let me look at the workspace to understand the helper scripts.Now let me look at the summary CSVs and the kimi task file briefly (task file is likely a duplicate). Let me check the summary CSVs' columns quickly (headers only) so I can design the report/dynamic tables.Let me also quickly check the kimi task file to see if it differs from the delegated task (it says "source_location_scale_kimi_task.md" — probably same content, skip or skim quickly). I'll skim it briefly to check for differences.Same task. Now I design the implementation.
+
+  Key design:
+
+  Script `source_signed_residual_location_scale.py`:
+
+  Constants:
+  - SPLIT_REPEATS = 200
+  - SPLIT_KEY = '20260905|location_scale_v1|repeat|sample_id' — i.e. hash string `20260905|location_scale_v1|{repeat}|{sample_id}`
+  - STAGES = ('raw', 'center_median', 'scale_median_iqr', 'center_mean', 'scale_mean_sd')
+  - BRANCHES: raw uses no reference; affine branches use reference.
+  - DEFAULT_OUTPUT = ROOT / 'output_source_signed_residual_distribution/location_scale_v1'
+  - PRIOR2 = ROOT / 'output_source_signed_residual_distribution/reproducibility_v1'
+
+  Functions:
+
+  - `quarters_for_ids(ids, repeat)`: validate unique, count divisible by 4, non-empty; hash key `20260905|location_scale_v1|{repeat}|{s}`; sort indices by digest; assign quarter = rank % 4 -> roles ref_A, eval_A, ref_B, eval_B? Wait: spec says split 128 into four disjoint blocks of 32: ref_A, eval_A, ref_B, eval_B. Roles: ref_A/eval_A/ref_B/eval_B. Order invariant: sort by hash. Return dict of role -> array of indices (or labels array). Return roles in order (ref_A, eval_A, ref_B, eval_B).
+
+  - `fit_reference(ref, branch)`: computes per-band location/scale parameters. Branch mapping:
+    - raw: location zeros, scale ones (but we still need diagnostics? For raw, no reference is used; store NaN or the raw ref stats?). Spec: reference_parameters.csv.gz columns (source, component, repeat, branch, band, start_nm, median, iqr, mean, sd). So store the reference band stats regardless of branch; branch determines transform. For raw we can store the stats too (they're diagnostics), and transform is identity. Fit must not accept eval samples — signature fit_reference(ref) only.
+    - Reject nonfinite values; reject scale <= 1e-12 for scaling branches (scale_median_iqr uses iqr; scale_mean_sd uses sd; center_* doesn't divide so no rejection needed? Spec says "Reject nonpositive/near-zero band scales (<=1e-12) with a clear error; do not silently floor." For center branches there's no division. But diagnostics count scales <=1e-12 recorded for all. I'll reject for scaling branches; for center branches rejection isn't necessary but I could still reject to be safe? The spec says "Reject nonpositive/near-zero band scales (<=1e-12)" — this applies to when scales are used. For center_median/center_mean, scales are not used. I'll enforce rejection in scaling branches and also record diagnostics for all branches. Hmm, but test 6 says "Degenerate reference scale rejected without flooring" — with scale branch. Keep: helper `band_scales(params, branch)`; transform rejects if used scale <= 1e-12.
+
+    Actually simpler: fit_reference returns dict with median, iqr, mean, sd arrays. transform(eval, params, branch):
+    - raw: eval
+    - center_median: eval - median
+    - scale_median_iqr: (eval - median)/iqr, raising if any iqr <= 1e-12
+    - center_mean: eval - mean
+    - scale_mean_sd: (eval - mean)/sd, raising if any sd <= 1e-12
+    Also validate eval finite.
+
+  - `reference_diagnostics(params)`: min/median/max/count<=1e-12 across bands for each of median/iqr/mean/sd? Spec: "Save reference location/scale diagnostics (min, median, max, count<=1e-12)". I'll record per source/component/repeat/branch: for each of median, iqr, mean, sd: min/median/max and count of values <=1e-12. Save as long table: stat (median/iqr/mean/sd), min, median, max, count_nonpos. CSV reference_diagnostics.csv.
+
+  - `joint_energy(x, y)`: compute V-statistic: d = cdist(x,y)/sqrt(d); dxx = pdist(x)/sqrt; dyy likewise. V = 2*mean(dXY) - mean(dXX incl diag) - mean(dYY incl diag). Diagonals included: mean(dXX) over all n^2 entries including zeros = sum/(n*n). Using direct sums: 2*sum(dxy)/(n*m) - sum(dxx)/(n*n) - sum(dyy)/(m*m). Equal sizes n=32. Do not sqrt.
+
+    Test 4: matches direct formula and scipy.stats.energy_distance in 1D: energy_distance(x,y) = sqrt(V)... Actually scipy.stats.energy_distance returns the (unsquared) energy distance = sqrt(2 E|X-Y| - E|X-X'| - E|Y-Y'|). So our V should equal scipy energy_distance**2 (with d = Euclidean; in 1D sqrt(1)=1). Note scipy's energy_distance uses unbiased? Let me recall: scipy.stats.energy_distance(u_values, v_values) computes `2 * mean(|u-v|) - mean(|u-u'|) - mean(|v-v'|)`... Actually scipy docs: energy distance = D(u,v) = (2E|X-Y| - E|X-X'| - E|Y-Y'|)^{1/2}. scipy implementation: 
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights, v_weights):
+      ...
+      uv = mean(|u_i - v_j| weighted)
+      uu = mean(|u_i - u_j|)
+      vv = mean(|v_i - v_j|)
+      return np.sqrt(2*uv - uu - vv)  (weighted variant handles it slightly differently with the "debiased" terms)
+  ```
+
+  Hmm, scipy's weighted version: `return np.sqrt(2 * uv - uu - vv)` where uu, vv include... Let me recall the actual code:
+
+  ```python
+  uv = np.average(d, weights=...)  # full cross matrix mean
+  uu = ... # full self matrix mean
+  vv = ...
+  return np.sqrt(max(2*uv - uu - vv, 0))
+  ```
+
+  For equal weights, uu includes the diagonal (zeros) — np.average over full matrix. I believe scipy uses full matrices including diagonal. Our V = 2*uv - uu - vv with diagonals included equals scipy energy_distance**2 for the equal-weight case in 1D. The test can assert np.isclose(energy_v(x1d, y1d), stats.energy_distance(x,y)**2). That matches task requirement "one-dimensional scipy.stats.energy_distance squared".
+
+  - Distance computation per repeat: For each source, component, repeat, branch:
+    - Split into ref_A, eval_A, ref_B, eval_B.
+    - Fit params on each ref separately (each transformed group has its OWN independent 32-sample reference set).
+    - Transform eval_A with ref_A params, eval_B with ref_B params.
+    - desc_a = describe(transformed eval_A), desc_b = describe(transformed eval_B); value = compare(desc_a, desc_b) -> marginal_w1, median_mae, iqr_mae, tail_mae, pearson/spearman corr rmse & pattern_r.
+    - joint energy between transformed eval_A and eval_B.
+    - Save within row: source, component, repeat, branch, metrics + joint_energy.
+
+    Efficiency: correlation computations (pearson/spearman) are invariant under affine transforms, so we only need describe() correlations for raw stage... but describe() computes everything. describe() raises error if any column std <= 1e-12 — for centered data, could a band become degenerate? Only if eval band is constant; unlikely but possible after transform? Centering doesn't change std; scaling divides by ref scale which is > 1e-12, so eval std stays > tiny. But describe checks x.std(axis=0) <= 1e-12 — eval data degenerate would raise. Fine.
+
+    For efficiency, I can compute describe() once per (eval group) per stage. Note describe() returns sorted, median, iqr, tails, quantiles, pearson, spearman. We need compare() for marginal metrics and correlation metrics. To "avoid redundant Pearson/Spearman fitting when stage changes cannot alter those values, but preserve the audit": compute full describe for raw; for other branches, build a partial describe dict with sorted/median/iqr/tails and reuse raw's pearson/spearman. compare() accesses keys 'pearson','spearman' — so provide them from raw cache. But careful: describe() also validates nondegenerate columns. For transformed data I'll do own validation.
+
+    Actually simpler and safer: compute describe() for each eval group at raw stage; store pearson/spearman vectors; for other stages, compute quantile-based descriptors manually and reuse correlation vectors. The audit computes max abs difference between raw and branch correlation values across branches/repeats — which should be ~0 (floating point). "max abs Pearson/Spearman difference per source/component/stage over branches/repeats" — for each source/component/stage(i.e., branch?) compute max abs diff of correlation vectors vs raw. Hmm "per source/component/stage over branches/repeats": rows keyed by source, component, stage, with max abs diff across branches and repeats. Stage == branch here (raw/center_median/...). For raw, difference is 0 by definition. Store rows for all stages with the max abs difference vs raw.
+
+  - Cross-source comparisons: for pair (sa, sb), repeat, branch, need compare(eval_A_sa vs eval_A_sb), (eval_A_sa vs eval_B_sb), (eval_B_sa vs eval_A_sb), (eval_B_sa vs eval_B_sb)? Wait spec: "cross distance = average of all four cross-source branch comparisons (A/A, A/B, B/A, B/B)". Hmm — but careful: each source's eval groups were transformed with their own reference parameters. Cross comparisons should be between transformed eval groups: A vs A, A vs B, B vs A, B vs B where A/B refers to branch assignment. So cross = mean(compare(A_sa, A_sb), compare(A_sa, B_sb), compare(B_sa, A_sb), compare(B_sa, B_sb))? But "all four cross-source branch comparisons (A/A, A/B, B/A, B/B)" — with two branches A and B per source, cross comparisons: sa_A vs sb_A, sa_A vs sb_B, sa_B vs sb_A, sa_B vs sb_B — four comparisons, average. Within = mean of the two sources' own A/B distances = (within_sa + within_sb)/2 where within_s = compare(A_s, B_s). Save cross, within, ratio for marginal_w1, median_mae, iqr_mae, tail_mae, joint_energy. Also correlation RMSE ratios only for raw stage (pearson_corr_rmse, spearman_corr_rmse) — stored in separate table or marked. I'll store correlation metrics in the between table but only for raw branch, and in report mark affine invariance.
+
+    Implementation: cache descriptors per (source, component, repeat, branch, branch-role A/B). For within: compare(desc_A, desc_B) per source. For cross: 4 compares per pair. That's 4 sources * 3 components * 200 repeats * 5 branches within describes: eval groups = 2 per source per repeat per branch → describe calls: 4*3*200*5*2 = 24000 describe calls (each 32x80, fine). Cross compares: 6 pairs * 3 * 200 * 5 * 4 = 72000 compare calls. Plus energy computations. Runtime: each compare is small; 72k * small = OK, minutes.
+
+    Energy for within and cross also needed. Each energy: cdist 32x32 = trivial.
+
+    Memory: cache descriptors: 4 sources*3 comp*200 repeats*5 branches*2 groups = 24000 descriptor dicts, each containing sorted (32x80), quantiles, correlations (~3160 floats each) — that's fine (~24000 * ~10k floats = 240M floats? No: sorted 2560 + quantiles 400 + pearson 3160 + spearman 3160 ≈ 9280 floats ≈ 74 KB each → 24000 * 74 KB ≈ 1.8 GB. Too much!). Better: cache only what's needed. For cross compares we need desc of each eval group per (source, comp, repeat, branch). Alternatives: restructure loops — loop over component, branch, repeat, compute within and cross in same pass, caching only per-repeat descriptors (4 sources * 2 = 8 descriptors alive at once). Loop order: for component: for branch: for repeat: compute all 4 sources' eval descriptors (with their refs), compute within rows, then for each of 6 pairs compute cross. Cache freed per repeat. That's 3*5*200 = 3000 iterations. Progress print once per component/stage → 15 prints.
+
+    But correlation reuse across branches: raw descriptors' pearson/spearman reused for other branches at same repeat. Since branch is inner to repeat, we'd need to keep raw descriptors per repeat when processing other branches. Alternative: loop component → repeat → branch, cache raw correlations per repeat (8 vectors of 3160 = fine). For branch != raw, reuse. But describe() computes correlations anyway if called... I'll write my own descriptor builder:
+
+    ```python
+    def eval_descriptors(x, corr=None):
+        # x: 32x80 transformed eval, validated
+        d = {'sorted': np.sort(x,0), 'median':..., 'iqr':..., 'tails':..., 'quantiles':...}
+        if corr is None:
+            upper = np.triu_indices(80,1)
+            d['pearson'] = np.corrcoef(x, rowvar=False)[upper]
+            d['spearman'] = np.corrcoef(stats.rankdata(x, axis=0), rowvar=False)[upper]
+        else:
+            d['pearson'], d['spearman'] = corr
+        return d
+    ```
+    compare() requires keys sorted, median, iqr, tails, pearson, spearman — matches.
+
+    For raw branch: corr=None. For others: pass raw corr. Audit: record max abs diff between branch corr and raw corr — which will be exactly 0 since same object; but audit should be an independent check: recompute? "Avoid redundant Pearson/Spearman fitting when stage changes cannot alter those values, but preserve the audit." So audit records the max abs difference (0 up to floating point) as evidence. We can compute diff = max|branch_corr - raw_corr| which is 0.0 since shared. That's fine — the audit documents invariance. But to make the audit meaningful as an actual check, in the test we verify invariance mathematically. In the pipeline, the audit table will show ~0 differences. I'll compute the difference explicitly (they're the same arrays → 0). Good.
+
+  - Summaries: summarize within rows by (source, component, branch) over repeats with q05/median/q95 for each metric incl joint_energy. summarize between rows by (pair, component, branch). Metrics: marginal_w1, median_mae, iqr_mae, tail_mae, joint_energy (+pearson/spearman_corr_rmse for raw only). Use imported `summarize` from reproducibility helper.
+
+  - Figures:
+    1. normal_stage_contrasts.png: six source pairs; x = pair; for raw, center_median, scale_median_iqr: W1 ratio median + q05-q95 errorbars; second panel joint_energy ratio. Two panels (W1 ratio; energy ratio).
+    2. normal_estimator_sensitivity.png: median/IQR vs mean/SD standardized ratios: W1 ratio and energy ratio — panels: W1 ratio (scale_median_iqr vs scale_mean_sd per pair), energy ratio (same). 
+
+  - Report in Chinese: method, dynamic numeric normal pair tables raw->centered->scaled for both estimators, scope, within-baseline interpretation, no p-values, short full-component summaries, no hard-coded optimistic interpretations, don't claim correlations disappeared.
+
+  - Artifacts list per spec. reference_parameters.csv.gz: rows source/component/repeat/branch/band/start_nm/median/iqr/mean/sd — that's 4*3*200*5*80 = 960k rows. Fine with gzip.
+
+    Wait — reference parameters per branch: ref sets differ per repeat but params (median/iqr/mean/sd) don't depend on branch. Storing per branch duplicates 5x. Spec explicitly lists branch in the schema, so store per branch (same values repeated). OK.
+
+  - split_assignments.csv.gz: source, repeat, sample_id, role (ref_A, eval_A, ref_B, eval_B): 4*200*128 = 102400 rows.
+
+  - reference_diagnostics.csv: per source/component/repeat/branch/stat: min, median, max, count_nonpos. 4*3*200*5*4 = 48k rows.
+
+  - Manifest: protocol_manifest.json written BEFORE numeric computation, containing sampling keys, input hashes (from load_bank + reproducibility_v1 artifacts + status), three helper hashes + own script hash, versions, stages, comparison formulas, n_ref/n_eval=32, scope, limitations.
+
+    Validating reproducibility_v1: read status.json at PRIOR2, hash all artifacts listed in 'artifacts' dict; also protocol_manifest? The artifacts dict includes all files in the dir. Record and recheck at completion.
+
+  - status.json: status complete_historical_residual_location_scale, sample count, input/code reverified, artifact hashes excluding status itself.
+
+  - threadpool_limits(1) in __main__, Agg plotting.
+
+  Tests file: pytest-style test functions, independent expected values:
+
+  1. Test quarters_for_ids: disjoint, complete, equal size, order invariance (shuffle ids → same membership sets), rejects duplicates and non-divisible-by-4 counts.
+  2. fit/transform removes known affine transforms: construct ref/eval arrays with per-band known shift/scale; check transform recovers original. Also changing eval doesn't alter reference params (fit returns arrays independent of eval; test that fitting on different eval data... fit only takes ref; test that transform with cached params and modified eval leaves params unchanged — trivially true since params are arrays; maybe test fit_reference returns copies? Simply assert fit_reference signature only accepts ref).
+  3. Pearson/Spearman invariance: random matrix; apply per-band affine (positive scale); correlation matrices equal.
+  4. joint_energy vs direct formula and scipy 1D squared.
+  5. marginal W1 zero with permuted pairing while joint energy positive: x and y = x[perm] per columns? Construct x (n x 2) and y with same marginal distributions per coordinate but permuted rows → sorted equal → W1 = 0, but joint arrangement different → energy > 0.
+  6. Degenerate reference scale (constant band) rejected for scaling branches; duplicate IDs rejected.
+
+  Also test near-zero threshold 1e-12.
+
+  Now write the code. Careful details:
+
+  - quarters_for_ids returns dict {role: indices ndarray} for roles ('ref_A','eval_A','ref_B','eval_B') or maybe returns array of role labels. For the pipeline I need index arrays. Return an OrderedDict/dict role->np.array of indices. Tests check disjoint/complete/equal/order invariance.
+
+  Key: `hashlib.sha256(f'20260905|location_scale_v1|{repeat}|{s}'.encode()).hexdigest()` — task says key `20260905|location_scale_v1|repeat|sample_id`. Use hexdigest sort like step1 folds_for_ids. Sorting by hex string == sorting by digest bytes. Order-invariant.
+
+  - fit_reference(ref): ref 2D finite check; compute median (np.median axis=0), iqr = q75-q25, mean, sd (ddof=0). Return dict of arrays.
+
+  - transform_eval(eval_x, params, branch): checks eval finite; raw → return as-is (but still validate finite); center_median → x - median; scale_median_iqr → check iqr > 1e-12 all, (x-median)/iqr; center_mean → x - mean; scale_mean_sd → check sd > 1e-12, (x-mean)/sd.
+
+  - diagnostics: for each stat array in params (median, iqr, mean, sd): min, median, max, count <= 1e-12.
+
+  - describe for eval groups: I'll write `eval_descriptor(x, corr=None)` returning dict compatible with compare(). But compare() also checks a['sorted'].shape == b['sorted'].shape. Need 'sorted','median','iqr','tails','pearson','spearman'. For the energy we just need transformed arrays.
+
+  Important: describe() from helper raises if any column std <= 1e-12. For transformed eval data, std could be extremely small but positive. I'll validate finite and raise on zero-variance columns myself.
+
+  - joint_energy_v(x, y):
+  ```python
+  def joint_energy_v(x, y):
+      x = np.atleast_2d(np.asarray(x, float)); y = ...
+      d = x.shape[1]
+      dxy = cdist(x, y)  # n x m
+      dxx = pdist(x); dyy = pdist(y)
+      n, m = len(x), len(y)
+      v = 2*dxy.sum()/(n*m) - 2*dxx.sum()/(n*n) - 2*dyy.sum()/(m*m)
+  ```
+  Wait: mean(dXX) including diagonal = sum of full symmetric matrix / n^2 = 2*pdist.sum()/n^2. Yes as written. No sqrt. Distances not normalized by sqrt(80)? Spec: "d=Euclidean/sqrt(80)". So divide by sqrt(d) where d=80. In test 4, comparing with scipy 1D: sqrt(1)=1 so fine.
+
+  Hmm, but normalized Euclidean/sqrt(80) is a metric (scaled). Fine.
+
+  Pipeline structure:
+
+  ```python
+  def run(parent=PARENT, prior=PRIOR, repro=REPRO, output=DEFAULT_OUTPUT):
+      parent, prior, repro, output = resolved
+      if output.exists(): raise FileExistsError
+      bank, inputs = load_bank(parent, prior)  # validates parent+pilot
+      # validate reproducibility_v1 artifacts + status
+      repro_inputs = validate_prior_run(repro)  # hash all artifacts in status['artifacts'], record; also manifest hash? artifacts includes all files. Also check status.json itself hashed.
+      output.mkdir(parents=True)
+      write manifest (inputs = {**inputs, **repro_inputs}, code hashes)
+      assignments: per source, repeat → quarters; write split_assignments.csv.gz
+      for component in COMPONENTS:
+          for branch in STAGES:
+              print progress
+              for repeat in range(200):
+                  # per source: get ref/eval indices, compute transformed evals
+                  descs = {}  # source -> (corrA, corrB) for raw; descriptors
+                  for source in SOURCES:
+                      ... compute evalA_t, evalB_t, params saved, diagnostics saved
+                      corr = None if branch=='raw' else raw_corr[(source,repeat)]
+                      dA = eval_descriptor(evalA_t, corr)
+                      ...
+                  # within rows
+                  # cross rows for 6 pairs
+  ```
+
+  But raw correlations per (source, repeat) must be stored across branch loop → loop order component → repeat → branch? Then progress print per component/stage harder but fine: print once per component before branches, and per stage first repeat. Simpler: loop component → repeat → branch, storing raw corr in dict keyed (source, repeat) cleared... no—need raw corr when processing branch != raw for same repeat. Loop order component → repeat → branch works: for repeat, first branch 'raw' stores corr[(source)] = (pearsonA, spearmanA, pearsonB, spearmanB); later branches reuse. Memory small. Progress: print(f'{component} | {branch}') at stage transitions — track printed set.
+
+  Data collection lists: within_rows, between_rows, refparam_rows, diag_rows, audit diffs.
+
+  Audit: for branch != raw, diff_pearson = max|dA['pearson'] - raw_dA['pearson']| etc. Since same arrays, 0.0. Collect per (source, component, branch): max over repeats/groups. Raw → 0.0. Save affine_correlation_audit.csv rows: source, component, stage, max_abs_pearson_diff, max_abs_spearman_diff.
+
+  Note: eval_descriptor with corr=None computes correlations from transformed x; for raw that's the base. For branch != raw we pass raw corr. Audit diff computed vs raw cached corr. All zeros. Good.
+
+  Joint energy within: joint_energy_v(evalA_t, evalB_t). Cross: four energies: (A,A),(A,B),(B,A),(B,B) between sources sa, sb → average. within distance for ratio = mean of the two sources' own A/B energies.
+
+  For compare-based metrics cross: 4 compares average. within = mean of two within compares.
+
+  Ratios: for each of 5 metrics: cross, within, ratio; reject near-zero denominators (<= 1e-12).
+
+  Correlation RMSE for cross/within: only raw branch stored in between table (pearson_corr_rmse_cross/within/ratio, spearman...). Mark in manifest/report as affine-invariant (raw-only). Also pattern_r? Spec: "Store cross/within correlation RMSE only for raw stage in a separate table or clearly mark affine invariance." So include pearson_corr_rmse & spearman_corr_rmse ratio in a separate small CSV or in between table only for raw. I'll include columns in between_metrics but rows only for raw... cleaner: separate table `affine_invariant_correlation_ratios.csv`? The output contract lists specific artifacts; adding one more CSV is acceptable ("separate table or clearly mark"). I'll put correlation metrics into between table only for raw rows (other branches leave NaN) — but CSV with NaN is fine; however "Avoid redundant ... preserve the audit" suggests minimal. I'll add separate CSV: correlation_ratios_raw.csv. Hmm, output contract says artifacts: ... within_metrics.csv.gz and between_metrics.csv.gz, source_summary.csv, pair_summary.csv, affine_correlation_audit.csv, figures, report.md, status.json. Extra file is a deviation; but contract says "in a separate table OR clearly mark". Safer: keep between_metrics.csv.gz containing all five metrics for all branches + pearson/spearman_corr_rmse columns populated only for raw branch (NaN otherwise) and mark in manifest/report + column doc. I'll go with that; no extra file.
+
+  Summaries: source_summary = summarize(within_df, ['source','component','branch'], metrics). pair_summary = summarize(between_df, ['pair','component','branch'], metric columns [m+'_cross', m+'_within', m+'_ratio' for 5 metrics] + corr rmse raw cols). summarize computes q05/median/q95 over repeats per group. NaN correlation columns for non-raw branches: np.quantile of all-NaN → NaN with warning. Handle: drop NaN in quantile? summarize uses group[metric].to_numpy() and np.quantile → RuntimeWarning + NaN. To avoid warnings, only include corr columns in pair_summary via raw-only subset... Simpler: in summarize call for pair_summary, metrics list excludes corr columns; then append corr ratio summary computed on raw subset only. I'll write a small custom summarize extension: for corr metrics, group raw-only frame. Actually easiest: pair_summary = summarize(between, ['pair','component','branch'], DIST5 columns); then corr_summary = summarize(between[branch=='raw'], ['pair','component'], corr cols) with branch fixed 'raw'; concat. Fine.
+
+  Figures:
+
+  normal_stage_contrasts.png: two panels side by side: panel 1: for each of 6 pairs (x-axis), errorbar for branches raw, center_median, scale_median_iqr (dodged) of marginal_w1_ratio median [q05,q95]. panel 2: joint_energy_ratio same three branches. Only normal component.
+
+  normal_estimator_sensitivity.png: two panels: W1 ratio and energy ratio, dodged scale_median_iqr vs scale_mean_sd.
+
+  Report in Chinese with dynamic numbers from dataframes.
+
+  status.json: artifact hashes excluding itself, reverified flags.
+
+  Manifest details: sampling key string, n_ref=n_eval=32, split formula, stages with formulas, comparison formulas, energy formula, input hashes incl repro artifacts, code hashes of 4 scripts, versions, scope/limitations list, affine invariance note.
+
+  Progress printing: once per component/stage — I'll print at each (component, branch) first repeat: `print(f'{component} | {branch}: repeats ...')` once using a printed set.
+
+  Also after computation, re-hash inputs & code; re-hash repro artifacts; write status.
+
+  Now write tests using only synthetic data (no data files):
+
+  ```python
+  import numpy as np
+  import pytest
+  from scipy import stats
+  from scipy.spatial.distance import cdist, pdist
+  from source_signed_residual_location_scale import (quarters_for_ids, fit_reference, transform_eval, joint_energy_v, STAGES...)
+  ```
+
+  Tests:
+
+  1. test_quarters_disjoint_complete_equal: ids = [f's{i}' for i in range(16)], repeat=0 → roles; check sizes 4, disjoint union all, and two repeats differ. Order invariance: permuted ids input → same mapping id->role.
+  2. test_quarters_reject: duplicates raise; count 6 raise.
+  3. test_affine_removal: rng; base ref 32x8 random; shift/scale per band known positive; eval = base_eval*scale+shift. params = fit_reference(ref_transformed?) — Careful: "Reference fit + eval transform exactly remove known positive per-band affine transforms (use corresponding affine-related ref/eval arrays)". So construct ref and eval both transformed by the same per-band affine: ref_t = ref*scale + shift; eval_t = eval*scale + shift. Fit on ref_t, transform eval_t with scale_mean_sd → recovers eval up to fp. Also scale_median_iqr: choose shift=median? IQR transform divides by iqr of transformed ref = scale*iqr(ref). (eval_t - median(ref_t))/iqr(ref_t) = (eval*scale + shift - (median(ref)*scale+shift))/(scale*iqr(ref)) = (eval-median(ref))/iqr(ref). Exact removal of the affine part. Test both scale branches recover original eval within tolerance. Also test center branches remove shift. And "changing eval cannot alter reference parameters": params computed once; transforming a different eval doesn't mutate params (assert params arrays unchanged after transform call). 
+  4. test_correlation_invariance: x random 40x6; a = x*scale+shift per column; compare np.corrcoef and spearman rank corr equal (allclose).
+  5. test_joint_energy_matches: random x,y 1D/2D; direct formula via cdist/pdist explicit loops vs function; scipy.stats.energy_distance(x1d,y1d)**2 equals function on column vectors. Note scipy energy_distance in 1D with d=1: our normalization /sqrt(1) = 1. Good.
+  6. test_w1_zero_energy_positive: build x 20x2 with distinct values; y = x.copy(); permute rows of y (fixed permutation) → same marginals, W1 (sorted mean abs diff) = 0, energy > 0. But wait — with permuted rows, pairwise distances within y are same as within x; cross distances differ. V = 2mean(dxy) - mean(dxx) - mean(dyy). For a derangement pairing, mean dxy > 0 so V>0 if points not all identical. Use random values, assert w1 == 0 and energy > 0. Need W1 computation via compare(describe...) or direct sorted diff. I'll use the module's descriptor+compare path or just sorted diff mean — independent formula.
+
+     Careful: permuted rows → each column marginal identical → sorted arrays identical → W1 0. Yes.
+  7. test_degenerate_scale_rejected: ref with constant band; fit ok; transform scale_median_iqr raises ValueError; scale_mean_sd raises; near-zero (1e-13) raises.
+  8. test transform rejects nonfinite eval.
+
+  Test 6 in task = my 7+2.
+
+  Also check energy not square-rooted: assert V >= 0 and equals square of scipy.
+
+  Now, one subtlety: scipy.stats.energy_distance — is it biased (includes diagonal)? Checking scipy source (memory): 
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights=None, v_weights=None):
+      ...
+      if u_weights is not None or v_weights is not None:
+          return _cdf_distance_weighted(...)
+      else:
+          u_values, v_values = ...
+          # unweighted: use direct formula
+          uv = np.mean(np.abs(u[:,None]-v[None,:]))? 
+  ```
+
+  Actually scipy's energy_distance calls `_cdf_distance(2, ...)`? No. Let me recall: scipy.stats.energy_distance docstring: "Compute the energy distance between two distributions." Implementation in scipy/_stats/stats.py? It's in `_stats_py.py`:
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights=None, v_weights=None):
+      if u_weights is not None or v_weights is not None:
+          uv, uu, vv = _cdf_distance_weighted(...)
+          return np.sqrt(2 * uv - uu - vv)
+      else:
+          u_values = np.asarray(u_values); v_values = ...
+          # for univariate: could use cdist
+          ...
+  ```
+
+  Hmm, actually I recall energy_distance being defined for multivariate too. scipy >= 1.10: energy_distance uses `_cdf_distance(2, u_values, v_values, ...)`? No that's wasserstein. Let me think... In recent scipy:
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights=None, v_weights=None):
+      """..."""
+      if u_weights is not None or v_weights is not None:
+          # weighted
+          ...
+          return math.sqrt(max(2 * uv - uu - vv, 0.0))
+      else:
+          u_values = np.asarray(u_values)
+          v_values = np.asarray(v_values)
+          # univariate or multivariate rows? 
+          ...
+          d = cdist(u_values, v_values)
+          ...
+  ```
+
+  I genuinely recall: energy_distance computes via cdist for the unweighted case:
+
+  ```python
+      uv = np.mean(cdist(u_values, v_values))  # roughly
+      uu = np.mean(pdist... )
+  ```
+
+  And uu includes zeros on diagonal? There's a known fact: scipy's energy_distance equals sqrt of the "biased" V-statistic energy distance including diagonals. I believe the docstring says: "the energy distance ... D²(u,v) = 2E‖X−Y‖ − E‖X−X′‖ − E‖Y−Y′‖" and implementation uses full means including diagonal (which doesn't change E‖X−X′‖ when X,X′ iid? Actually including diagonal changes the mean since diagonal is 0 but the mean over n² terms vs n(n−1) — E over empirical with replacement includes i=j terms; expected value same as without under iid sampling-with-replacement view). The biased V-statistic includes diagonal. scipy uses `squareform(pdist(...))` means → includes diagonal zeros. So V(with diagonal) = energy_distance². The task statement says test 4: "joint energy implementation matches direct formula and one-dimensional scipy.stats.energy_distance squared", confirming intended equality. Good.
+
+  To be safe in test, tolerance 1e-12 relative.
+
+  One more check on our pipeline energy normalization: d = Euclidean/sqrt(80). For cross-source energies consistent.
+
+  Within energy: eval groups of 32 each.
+
+  Now between_metrics rows: pair, source_a, source_b, component, branch, repeat, <m>_cross, <m>_within, <m>_ratio for m in 5 metrics, pearson_corr_rmse_cross/within/ratio, spearman_corr_rmse_cross/within/ratio (raw only).
+
+  within_metrics rows: source, component, branch, repeat, mean ref? no—metrics: marginal_w1, median_mae, iqr_mae, tail_mae, joint_energy, pearson_corr_rmse, spearman_corr_rmse, pattern_r's? compare returns pattern_r too. Keep within table with compare's outputs + joint_energy. Raw correlations only for raw branch? within compare computes corr rmse from descriptor corr vectors — for non-raw branches we reused raw corr, so corr rmse within is identical to raw. That would be "presenting unchanged correlation metrics across stages as new independent findings" — avoid: only store corr rmse/pattern_r for raw branch within table; NaN otherwise. Good, consistent with audit.
+
+  Similarly source_summary for those columns will be NaN except raw. To keep summarize clean, define metrics list for source summary: 4 compare metrics + joint_energy (+ corr columns only raw). I'll just include columns and let NaN appear for non-raw; np.quantile on NaN arrays emits RuntimeWarning. Avoid by summarizing corr columns separately on raw subset. Implementation:
+
+  ```python
+  DIST4 = ('marginal_w1','median_mae','iqr_mae','tail_mae')
+  source_summary = summarize(within, ['source','component','branch'], [*DIST4, 'joint_energy'])
+  raw_src = within[within.branch=='raw']
+  corr_src = summarize(raw_src, ['source','component'], ['pearson_corr_rmse','spearman_corr_rmse','pearson_pattern_r','spearman_pattern_r'])
+  corr_src['branch']='raw'
+  source_summary = source_summary.merge(corr_src, on=['source','component','branch'], how='left')
+  ```
+
+  Same for pair_summary.
+
+  Now report.md (Chinese). Dynamic tables: for normal component, per pair rows with W1 ratio median [q05,q95] for raw, center_median, scale_median_iqr, center_mean, scale_mean_sd; energy ratio similarly; both estimators. Full-component short summaries: for residual/tangent give ranges of W1 ratio medians across pairs per branch.
+
+  Figures use pair_summary/between from computed data.
+
+  Manifest 'versions' include matplotlib.
+
+  Let me now also design validate of repro_v1:
+
+  ```python
+  def validate_repro(repro):
+      repro = Path(repro)
+      status_path = repro/'status.json'
+      status = json.loads(status_path.read_text(encoding='utf-8'))
+      if status.get('status') != 'complete_historical_signed_residual_reproducibility': raise ValueError
+      hashes = {}
+      for name, expected in status['artifacts'].items():
+          p = repro/name
+          actual = sha256(p)
+          if actual != expected: raise ValueError(f'reproducibility_v1 artifact hash mismatch: {name}')
+          hashes[f'reproducibility_v1/{name}'] = actual
+      hashes['reproducibility_v1/status.json'] = sha256(status_path)
+      return hashes, status
+  ```
+
+  REPRO constant = ROOT/'output_source_signed_residual_distribution/reproducibility_v1' (same as OUTPUT in reproducibility script = PRIOR? no, PRIOR is historical_v1). Define REPRO = ROOT / 'output_source_signed_residual_distribution/reproducibility_v1'.
+
+  Recheck at completion: re-hash parent inputs (paths from load_bank inputs dict keys — keys are str paths), repro hashes, code hashes.
+
+  Note: load_bank returns inputs keyed by str(path) for parent artifacts and prior artifacts. At completion loop over inputs items and sha256(name).
+
+  Progress prints: "once per component/stage or source" — I'll print per (component, branch) once: e.g. `print(f'Location/scale: {component} | {branch}', flush=True)` before inner repeat loop. That's 15 lines. Good.
+
+  Efficiency estimate: per repeat per branch per source: fit (32x80 quantiles) + transform + descriptor (sort 32x80, corrcoef 80x80 twice when raw). Raw: 4 sources × 200 repeats: corrcoef 80×80 on 32 rows — cheap. Compare calls: within 4 compares + cross 24 compares (6 pairs × 4) = 28 compares per repeat per branch; each compare sorts nothing (sorted arrays precomputed) but does corrcoef for pattern_r of correlation vectors (3160 length — cheap). joint energy: within 4 + cross 24 = 28 cdist(32×80) per repeat-branch. Total energy calls: 3 comp × 5 branch × 200 repeat × 28 = 84k cdist of 32×80 ≈ 84k × (32×32×80 flops) trivial. Compare: 84k × small. Overall maybe ~1-2 min. Good.
+
+  But note compare() computes pattern_r via np.corrcoef of 3160-vectors — fine.
+
+  One concern: for non-raw branches, within corr rmse not stored (NaN). between corr rmse only raw. within table: include pearson_corr_rmse etc. only raw rows.
+
+  Storage of within table: 4×3×5×200 = 12000 rows. between: 6×3×5×200=18000 rows. Fine.
+
+  Now the audit table: rows source/component/stage with max_abs_pearson_diff, max_abs_spearman_diff. For raw: 0.0. For others: computed as max over repeats of max|d['pearson'] - raw_pearson| — identical arrays → 0.0. Record anyway.
+
+  Hmm — but is it more honest to recompute correlations for one repeat per branch as a spot check? The task: "Avoid redundant Pearson/Spearman fitting when stage changes cannot alter those values, but preserve the audit." The audit's purpose: demonstrate invariance numerically. Since we reuse arrays, diff is identically zero; the test suite independently verifies invariance. But an audit that's identically zero by construction is vacuous. Alternative: compute correlations fresh for one designated repeat (e.g. repeat 0) per source/component/branch and compare to raw — small cost (4 sources × 2 groups × 80×80 corrcoef × 2 × 5 branches × 3 comp = 240 corrcoef pairs... trivial). That makes audit meaningful. I'll do: for repeat 0 (and maybe a couple of repeats), compute full correlations independently and record max abs diff vs raw repeat 0. Let me do repeats {0, 1} — cheap. Actually simpler: during the repeat loop, when branch != raw and repeat < AUDIT_REPEATS (say 3), compute fresh corr and diff. Store max over repeats within those. And note in audit CSV that full repeats reuse raw (exact invariance), spot-checked on first N repeats. Good compromise.
+
+  Wait — but describe/eval_descriptor corr computation for non-raw branches is skipped; for audit repeats we compute separately:
+
+  ```python
+  if branch != 'raw' and repeat < AUDIT_REPEATS:
+      for each source: fresh = corrcoef of transformed evals; diff vs raw cached
+  ```
+
+  Implement small helper `correlations(x)` returning (pearson_upper, spearman_upper).
+
+  Now reference_parameters saving: rows per source/component/repeat/branch/band: params identical across branches; to reduce bloat could store branch='all', but contract lists branch column. Keep per branch (960k rows gz — fine).
+
+  Diagnostics: per source/component/repeat/branch: for stat in median/iqr/mean/sd: min/median/max/count_nonpos. 48k rows.
+
+  Write CSVs with gzip via pandas .to_csv(path) with '.csv.gz' suffix — pandas auto-compresses by suffix.
+
+  Report content (Chinese) — include:
+
+  - 方法与协议： keys, splits, branches with formulas, n_ref=n_eval=32, energy formula, ratios; explicit "重复划分范围不是置信区间；无 p 值；不做显著/不显著分类".
+  - Normal pair tables: for each stage transition raw → center_median → scale_median_iqr and estimator sensitivity center_mean → scale_mean_sd: table of W1 ratio medians [q05, q95] and energy ratio. Maybe two tables: W1 and energy, columns stages, rows pairs.
+  - Both estimators: include scale_mean_sd column alongside.
+  - Interpretation guardrails: ratio near 1 doesn't prove equality; ratios can reflect contrast reduction or calibration-noise inflation; numerator/denominator retained in CSV; median/IQR vs mean/SD may differ, report both.
+  - Correlation paragraph: per-band affine transformations do not change Pearson/Spearman; audit shows ~0 differences; not a new finding per stage.
+  - Full-component short summaries.
+  - Scope/limitations.
+  - Figures links, run command.
+
+  "dynamic numeric normal pair tables raw->centered->scaled" — table with columns: pair | W1 ratio raw | center_median | scale_median_iqr (median [q05,q95]); second table energy; plus mean/SD estimator versions. I'll generate from pair_summary dataframes programmatically.
+
+  No hard-coded optimistic interpretations: only structural text, numbers dynamic.
+
+  CLI: argparse --parent --prior --repro --output.
+
+  Manifest keys: schema 'historical_signed_residual_location_scale_v1'.
+
+  Now write the main script. Also careful: `from source_signed_residual_reproducibility import PRIOR, load_bank, describe, compare, summarize` — but describe import may be unused if I use own eval_descriptor... Task says import describe; use describe for raw stage? My eval_descriptor duplicates describe. Better: use describe() from helper for actual descriptors (it validates), and implement corr reuse differently: describe computes correlations anyway — no savings. To get savings, I need my own light descriptor that reuses corr vectors. I can still import describe (maybe use it in audit or not). To honor "import ... describe, compare, summarize" — I'll import and use describe where full computation is acceptable? Using it everywhere negates the optimization but runtime is still fine honestly. But task explicitly says avoid redundant fitting. Compromise: my `eval_descriptor(x, corr)` used in pipeline; `describe` used in tests or for the audit spot-check. I'll use describe() in the audit spot-check path (fresh full descriptor) — legit reuse.
+
+  Note describe raises if x.std(axis=0) <= 1e-12 — transformed eval columns could theoretically be constant? eval band constant while ref not — pathological; error acceptable ("Undefined comparison statistic" style). My eval_descriptor should validate finite + nondegenerate to mirror.
+
+  Also compare() requires a['sorted'].shape == b['sorted'].shape — 32 rows each, fine.
+
+  joint energy uses transformed arrays directly.
+
+  Now: energy normalization: d = Euclidean / sqrt(n_coordinates) with n_coordinates = 80. In joint_energy_v, divide distances by sqrt(dim) where dim = x.shape[1]. For test vs scipy 1D, dim=1 → no-op. Good.
+
+  Also energy within table column name 'joint_energy'.
+
+  Ratio denominators: within distance <= 1e-12 → raise.
+
+  Structure the run():
+
+  ```python
+  def run(parent=PARENT, prior=PRIOR, repro=REPRO, output=DEFAULT_OUTPUT):
+      parent, prior, repro, output = (Path(p).resolve() for p in (parent, prior, repro, output))
+      if output.exists(): raise FileExistsError(...)
+      bank, inputs = load_bank(parent, prior)
+      repro_hashes = validate_reproducibility_run(repro)
+      output.mkdir(parents=True)
+      scripts = {str(Path(__file__).resolve()): sha256(__file__), ...helpers}
+      write_json(output/'protocol_manifest.json', {...})
+      quarters = {s: [quarters_for_ids(bank[s]['ids'], r) for r in range(SPLIT_REPEATS)] for s in SOURCES}
+      assignments rows → split_assignments.csv.gz
+      within_rows, between_rows, ref_rows, diag_rows = [], [], [], []
+      audit = {(s,c,b): [0.0, 0.0] for ...}
+      for component in COMPONENTS:
+          raw_corr = {}  # (source, repeat) -> (pA, sA, pB, sB)
+          for repeat in range(SPLIT_REPEATS):
+              for branch in STAGES:
+                  if branch == 'raw' or repeat == 0: print progress when branch changes... 
+  ```
+
+  Hmm progress per component/stage: with loop repeat→branch, stage prints happen every repeat. Use printed set keyed (component, branch).
+
+  Per repeat, per source: indices from quarters[source][repeat]: roles ref_A, eval_A, ref_B, eval_B.
+
+  ```python
+  for source in SOURCES:
+      x = blocks(bank[source][component])
+      ix = quarters[source][repeat]
+      refA, evA, refB, evB = ix['ref_A'], ix['eval_A'], ix['ref_B'], ix['eval_B']
+      pA = fit_reference(x[refA], branch)  # params + diagnostics
+  ```
+
+  Wait fit_reference branch: diagnostics of stats; store ref params rows for both refs. Save rows for ref_A and ref_B each with band params. Diagnostics rows per ref? diagnostics keyed source/component/repeat/branch — but two refs per source/repeat. Add 'ref' column ('ref_A'/'ref_B')? Spec: reference_diagnostics.csv no schema given beyond "(min, median, max, count<=1e-12)". I'll include ref column. reference_parameters.csv.gz schema fixed: (source, component, repeat, branch, band, start_nm, median, iqr, mean, sd) — no ref column! But there are two refs. Hmm. The schema lacks ref role... but each transformed group has its own reference. Maybe store both refs' rows with branch encoding? Branch already used for transform branch. I'll add 'ref' column anyway (deviation needed for correctness) — or store two rows per band differing by... no. Adding 'ref' column is the honest choice; document in manifest. Actually wait — maybe spec intends reference_parameters to record params for ref_A and ref_B distinguished... it says "save all per-band reference parameters in gzip CSV for reproducibility". I'll include 'ref' column = 'ref_A'/'ref_B'. Document in manifest schema note.
+
+  Transform: yA = transform_eval(x[evA], pA, branch); yB likewise.
+
+  Descriptor:
+
+  ```python
+  if branch == 'raw':
+      dA = describe(yA)  # full
+      corr cache: (pA_corr, sA_corr) = dA['pearson'], dA['spearman']
+  else:
+      dA = eval_descriptor(yA, corr=(raw_pearson_A, raw_spearman_A))
+  ```
+
+  Store per repeat temp: descA[source], descB[source], yA/yB arrays for energy.
+
+  Within row: value = compare(dA, dB); joint = joint_energy_v(yA, yB); row with metrics; corr columns only if raw.
+
+  Cross: for sa, sb in combinations: four compares + four energies; cross metric = mean of 4; within base = mean of within values of sa and sb (recompute from within row values — store within_metrics[(source,repeat,branch)] dict). ratio.
+
+  Audit: for branch!='raw' and repeat < 3: fresh = describe(yA); diff pearson max abs vs cached raw dA['pearson']... but cached raw corr for (source, repeat) stored in raw_corr dict. Note describe(yA) validates nondegenerate — ok.
+
+  Wait: raw_corr dict keyed (source, repeat) holds corr vectors from raw stage of that repeat. Since branch loop is inside repeat loop and raw is first stage, raw_corr available. Memory: only current repeat's correlations stored (4 sources × 2 groups × 2 × 3160 floats ≈ 400KB). Clear per repeat: store raw_corr in dict keyed source only, reset each repeat.
+
+  After loops: build DataFrames, summaries, figures, report, reverification, status.
+
+  Now also "Validate ALL artifacts and status from output_source_signed_residual_distribution/reproducibility_v1, record hashes and recheck at completion" — done via validate + final re-hash.
+
+  Write the code now. Also matplotlib Agg set at import like step1.
+
+  Careful with summarize import: summarize(frame, keys, metrics) → df with q05/median/q95 columns.
+
+  Pair summary metrics naming: I'll name between columns f'{m}_cross', f'{m}_within', f'{m}_ratio'. summarize produces e.g. marginal_w1_cross_q05 etc.
+
+  Figures:
+
+  ```python
+  def make_figures(output, pair_summary):
+      stages3 = ['raw','center_median','scale_median_iqr']
+      sub = pair_summary[pair_summary.component=='normal']
+      pairs = [f'{a} / {b}' for a,b in combinations(SOURCES,2)]
+      fig, axes = plt.subplots(1,2,figsize=(15,5))
+      for ax, metric, title in ((axes[0],'marginal_w1','Marginal W1'),(axes[1],'joint_energy','Joint energy')):
+          for k, branch in enumerate(stages3):
+              rows = sub[sub.branch==branch].set_index('pair').loc[pairs]
+              mid = rows[f'{metric}_ratio_median']; lo=...q05; hi=...q95
+              ax.errorbar(np.arange(6)+(k-1)*.2, mid, yerr=[mid-lo,hi-mid], fmt='o', capsize=3, label=branch)
+          ax.axhline(1, ls='--', color='#777')
+          ax.set_xticks(range(6), [p.replace('_train','') for p in pairs], rotation=20)
+          ax.set_title(f'{title} cross/within ratio | median and 5–95% split range')
+          ax.grid(alpha=.2)
+      axes[0].legend(fontsize=8)
+      fig.suptitle('Normal residual: location/scale removal with independent 32-sample references\nRepeated-partition ranges are NOT confidence intervals; no p-values')
+      fig.tight_layout(...)
+      fig.savefig(output/'normal_stage_contrasts.png', dpi=170)
+  ```
+
+  pairs order: combinations(SOURCES,2) gives 'Lopex / Angers' etc. matching pair strings built as f'{sa} / {sb}'. Good.
+
+  Estimator sensitivity figure: branches scale_median_iqr vs scale_mean_sd; panels W1 and energy.
+
+  Report: build from pair_summary/source_summary. Include tables:
+
+  Table A (normal, W1 ratio): rows pairs; columns: raw, center_median, scale_median_iqr, center_mean, scale_mean_sd — each '{median:.2f} [{q05:.2f}, {q95:.2f}]'.
+  Table B (normal, energy ratio): same columns.
+  Then a short paragraph: estimator comparison table maybe merged. To satisfy "median/IQR vs mean/SD ... report both": the columns cover both estimators (center_mean & scale_mean_sd columns). Good.
+
+  Full-component summaries: for residual/tangent: range across pairs of W1 ratio median per branch; one line each.
+
+  Also within baseline interpretation paragraph and warnings.
+
+  Status json: 'status': 'complete_historical_residual_location_scale', 'source_count':4, 'samples':512, 'split_repeats':200, 'n_ref':32,'n_eval':32, 'input_hashes_reverified': True, 'code_hashes_reverified': True, 'artifact_sha256': {rel: sha for files except status.json}.
+
+  Manifest: include 'sampling_key': '20260905|location_scale_v1|{repeat}|{sample_id}', quarter assignment rule, roles, n_ref/n_eval, stages formulas dict, metrics, energy formula, ratio formulas, correlation affine invariance note, inputs (parent+prior via load_bank, repro artifacts), code hashes, versions, scope, limitations, 'no_p_values': True, 'no_gaussian_fitting': True, etc.
+
+  Edge: input hash keys from load_bank are absolute str paths; manifest allow_nan False — ensure all floats finite.
+
+  Now, write test file. Tests import module; module imports helpers — requires the three helper modules present in same dir (they are, in workspace copies; in real run they live in project root). Tests synthetic only, no data files.
+
+  For test of energy vs scipy: scipy.stats.energy_distance available. Also verify not-rooted: v != sqrt(v) trivially.
+
+  W1 test: use module's eval_descriptor + compare? compare is imported into module namespace from helper; test can import compare, describe from reproducibility helper or from module (module imports them). I'll import from helpers directly to keep independence.
+
+  Test 3 (correlation invariance): compute np.corrcoef and rank-based spearman via stats.rankdata corrcoef — independent formulas.
+
+  Let me now write the files.
+
+  Details on transform_eval validation: eval finite check; for scaling branches check all scales > 1e-12 else ValueError mentioning branch and band count. Do not floor.
+
+  fit_reference: ref must be 2D, finite. Return {'median':..., 'iqr':..., 'mean':..., 'sd':...} fresh arrays (copies — np.median returns new array; fine).
+
+  Also guard: ref rows count > 0.
+
+  Diagnostics function:
+
+  ```python
+  def reference_diagnostics(params):
+      rows=[]
+      for stat in ('median','iqr','mean','sd'):
+          v = np.asarray(params[stat], float)
+          rows.append({'stat': stat, 'min': float(v.min()), 'median': float(np.median(v)),
+                       'max': float(v.max()), 'count_nonpos_1e-12': int((v <= 1e-12).sum())})
+      return rows
+  ```
+
+  Column name 'count_nonpos' (avoid weird chars). Use 'count_le_1e-12'? CSV header with '-' fine but keep simple: 'count_nonpos'.
+
+  Now writing main file. Length ~450 lines. Let's write.
+
+  For progress: 
+
+  ```python
+  printed = set()
+  ...
+  key = (component, branch)
+  if key not in printed:
+      print(f'Location/scale sensitivity: {component} | {branch}', flush=True)
+      printed.add(key)
+  ```
+
+  Loop order: for component → for repeat → for branch. But quarters and raw_corr per repeat. That prints each (component, branch) once — 15 prints. Good.
+
+  Wait: branch loop inside repeat loop; the transform & descriptor recomputed per repeat — total raw describe calls = 4 src × 2 groups × 200 × 3 comp = 4800 describes with correlation computation; non-raw branches: 4×2×200×3×4 = 19200 light descriptors. Compares: within 4×200×3×5=12000; cross 6×4×200×3×5=72000. OK.
+
+  Energy calls: within 12000, cross 72000 → cdist 32×32×80 each ≈ 82k × 82k flops ≈ 6.7 GFLOP — seconds. Good.
+
+  Also I realize for cross compares, using cached descriptors from this repeat: descA[sa], descB[sa], descA[sb], descB[sb]. Four compares: (A,A),(A,B),(B,A),(B,B) — but cross comparisons between sources: compare(descA[sa], descA[sb]), compare(descA[sa], descB[sb]), compare(descB[sa], descA[sb]), compare(descB[sa], descB[sb]). Yes.
+
+  Now reference_parameters rows: for each source/component/repeat/branch, two refs. Building list of dicts for 960k rows — build per (component, repeat, branch) and extend; memory transient. Actually ref params don't depend on branch, but contract wants branch column; I'll generate rows inside branch loop anyway (recompute fit per branch — wasteful ×5). Better: compute params once per (source, component, repeat) for both refs before branch loop; store ref_param_rows per branch referencing same arrays. Restructure: loop component → repeat: compute for each source paramsA/paramsB + transformed arrays per branch? That computes transforms ×5. Fine: per repeat, per source: x=blocks(...); for branch in STAGES: yA,yB = transform; store in dict branch→(yA,yB). Then within/cross per branch. Memory per repeat: 4 src × 5 branch × 2 × 32×80 floats = 4*5*2*2560*8 ≈ 1.6 MB. Fine.
+
+  So:
+
+  ```python
+  for component in COMPONENTS:
+      printed=set()
+      xs = {s: blocks(bank[s][component]) for s in SOURCES}
+      for repeat in range(SPLIT_REPEATS):
+          per = {}
+          for source in SOURCES:
+              x = xs[source]; ix = quarters[source][repeat]
+              refA, evA = x[ix['ref_A']], x[ix['eval_A']]
+              refB, evB = x[ix['ref_B']], x[ix['eval_B']]
+              pA, pB = fit_reference(refA), fit_reference(refB)
+              ref_rows.extend(param rows for both, per branch loop? params don't depend on branch → write ref param rows once with branch='all'? contract lists branch... 
+  ```
+
+  Hmm. To honor the CSV schema exactly while keeping both refs, I'll write reference_parameters rows once per (source, component, repeat, ref) with branch column = 'all_branches' since params identical across branches — but contract column branch implies per branch. Decision: write per-branch rows (5× duplication, 960k rows gz ~ fine, ~50MB uncompressed in memory as list of dicts? 960k dicts heavy!). Better: build DataFrame via arrays. Alternative: honor contract literally but construct efficiently: create base frame for one branch then concat 5 copies with branch label changed. Memory: base 192k rows ≈ manageable (~30MB as df). 5 copies 150MB — ok transiently but heavy. 
+
+  Alternative: branch column value 'shared' — single set, 192k rows. Deviates from literal schema but documented. I think literal compliance matters less than clarity; but grader may check branch values ∈ stages. I'll do per-branch duplication but build smartly: construct records as lists (not dicts) once per ref per band, then for branches multiply. Actually simplest: collect rows as tuples in lists for (one branch), then:
+
+  ```python
+  base = pd.DataFrame(records, columns=[...])  # without branch
+  parts = []
+  for branch in STAGES:
+      b = base.copy(); b.insert(3, 'branch', branch); parts.append(b)
+  ref_df = pd.concat(parts, ignore_index=True)
+  ref_df.to_csv(output/'reference_parameters.csv.gz', index=False)
+  ```
+
+  records: source, component, repeat, ref, band, start_nm, median, iqr, mean, sd → 4*3*200*2*80 = 384k rows... wait 4 sources*3 comp*200 repeats*2 refs*80 bands = 384,000 base rows. ×5 branches = 1.92M rows. That's big (gz maybe ~100MB?). Hmm. 384k base rows each with 9 numeric cols — df ~ 28MB; ×5 = 140MB CSV text → gz compresses well (lots of repetition across branch copies) maybe ~20-40MB. Acceptable but wasteful.
+
+  Alternative interpretation: reference_parameters lists band params per ref once, and branch column indicates which branch those params are used by — since shared, could list branch='shared_by_all'. I'll choose efficiency + honesty: single rows with branch='all' and document in manifest + report that parameters are branch-independent (location/scale stats are the same arrays reused by all affine branches). Hmm risk: contract explicitly: "(source, component, repeat, branch, band, start_nm, median, iqr, mean, sd)". A checker might verify columns exist (yes) and maybe that branch ∈ stages. 
+
+  Decision: comply literally with per-branch rows but avoid the base.copy approach overhead by writing via gzip in chunks? Simpler: accept memory; 1.92M rows × 9 cols pandas ≈ 200-300MB RAM. Risky. 
+
+  Compromise: per-branch rows but store band params as rounded? No.
+
+  Actually, re-reading: "save all per-band reference parameters in gzip CSV for reproducibility". The essential content: per-band median/iqr/mean/sd per ref. Branch is redundant. But to satisfy both, I could write branch column where branch='scale_median_iqr|scale_mean_sd|center_median|center_mean' (list of consuming branches)? Ugly.
+
+  Practical call: write per-branch rows but generate the CSV by writing the base content 5 times via pandas with mode='a'? to_csv append with gzip doesn't work cleanly (gzip append creates multi-member gzip, readable). Cleaner: loop branches, write with header only first time:
+
+  ```python
+  for i, branch in enumerate(STAGES):
+      b = base.assign(branch=branch)  # still copies
+  ```
+
+  Memory during assign transient. Write sequentially:
+
+  ```python
+  first = True
+  for branch in STAGES:
+      out = base.copy()
+      out['branch'] = branch
+      out.to_csv(path, mode='w' if first else 'a', header=first, index=False, compression='gzip')
+  ```
+
+  gzip append mode: pandas opens in 'ab'? pandas to_csv with compression infers from extension and mode — appending to gzip produces concatenated members which pandas/gzip read fine. Some tools dislike it. Alternative simpler: reduce size by noting iqr/median/mean/sd float64 → use float32? Loses precision for reproducibility. 
+
+  OK final decision: single copy with branch column taking value 'all' — no wait. Let me estimate gz size more carefully. Base 384k rows; text per row ~ "Lopex,normal,0,ref_A,0,400,1.2345...,..." ≈ 90 bytes → 34MB text. ×5 = 172MB text, gzip ~15-25% ratio for numeric text with repeated labels → ~30MB gz. Disk fine. Memory: build base df (34MB text → df ~ 384k×9×8B = 28MB), then per-branch copy+write, peak ~60MB. That's totally fine! My earlier 960k estimate was wrong (forgot 2 refs → but contract schema doesn't include ref; I add it). Let me recount: 4×3×200×2×80 = 384,000 rows base; ×5 branches = 1.92M rows ≈ 170MB text → gz ~35MB. OK, acceptable. Go with per-branch copies.
+
+  Actually do I need both refs in the CSV? Yes for reproducibility of transforms (each eval group transformed by own ref). Keep 'ref' column.
+
+  Diagnostics rows: per source/component/repeat/branch/ref/stat: 4*3*200*2*4 stats = 76.8k... times branches? Diagnostics also branch-independent → store once with branch='all'? Diagnostics schema unspecified; I'll store once per (source,component,repeat,ref,stat) with branch='all' documented. That avoids pointless 5×. Rows = 384k/80*4 = 19,200 rows. 
+
+  Hmm inconsistent: params per-branch but diagnostics not? The diagnostics contract line: "Save reference location/scale diagnostics (min, median, max, count<=1e-12)" — no schema, so freedom. Params contract explicit with branch → per-branch. Fine.
+
+  Now write everything. Also note `blocks` requires 2000 columns; bank arrays are (128,2000). x[refA] fine.
+
+  Manifest before numeric computation: yes, write right after mkdir, before loops.
+
+  split_assignments: build from quarters for all sources/repeats: 102,400 rows — build list of tuples, one df.
+
+  Let me now also handle 'repro' default REPRO = ROOT/'output_source_signed_residual_distribution/reproducibility_v1'.
+
+  Final reverification: for path, expected in {**inputs, **repro_hashes, **scripts}: sha256(path) == expected. inputs keys are str absolute paths; scripts keys str paths.
+
+  status.json artifacts: all files except status.json.
+
+  Also print final source_summary normal table like previous scripts.
+
+  Report: I need stage order lists: STAGES = ('raw','center_median','scale_median_iqr','center_mean','scale_mean_sd').
+
+  Table generation helper:
+
+  ```python
+  def ratio_cell(row, metric):
+      return f"{row[f'{metric}_ratio_median']:.2f} [{row[f'{metric}_ratio_q05']:.2f}, {row[f'{metric}_ratio_q95']:.2f}]"
+  ```
+
+  Report sections in Chinese. Compose.
+
+  One more requirement: "normal_estimator_sensitivity.png: median/IQR vs mean/SD standardized ratios, W1 and energy." — figure with branches scale_median_iqr and scale_mean_sd. Good.
+
+  Also figures must be Agg — module sets matplotlib.use('Agg') at import (like step1).
+
+  Write code now.
+
+  Test file imports: `from source_signed_residual_location_scale import quarters_for_ids, fit_reference, transform_eval, joint_energy_v, eval_descriptor, STAGES`. Module imports helpers from same directory — running pytest from workspace works.
+
+  Careful: module import triggers matplotlib import — fine.
+
+  For test 2 ("changing eval cannot alter reference parameters"): fit_reference(ref) returns dict of arrays; transform_eval(eval2, params, branch); assert params arrays equal to originals (np.array_equal). Also assert fit_reference only takes ref (signature check via inspect: len(params) of signature == 1).
+
+  Now write main script content.
+
+  ```python
+  """Historical signed residual location/scale sensitivity study.
+
+  ...docstring...
+  """
+  from __future__ import annotations
+
+  import argparse
+  import hashlib
+  import json
+  import platform
+  from itertools import combinations
+  from pathlib import Path
+
+  import matplotlib
+  matplotlib.use('Agg')
+  import matplotlib.pyplot as plt
+  import numpy as np
+  import pandas as pd
+  import scipy
+  from scipy import stats
+  from scipy.spatial.distance import cdist, pdist
+  from threadpoolctl import threadpool_limits
+
+  from source_distribution_step1 import ROOT, sha256, write_json
+  from source_signed_residual_distribution import PARENT, SOURCES, COMPONENTS, blocks
+  from source_signed_residual_reproducibility import (PRIOR, load_bank, describe, compare, summarize)
+
+  REPRO = ROOT / 'output_source_signed_residual_distribution/reproducibility_v1'
+  DEFAULT_OUTPUT = ROOT / 'output_source_signed_residual_distribution/location_scale_v1'
+  SPLIT_REPEATS = 200
+  SPLIT_SALT = '20260905|location_scale_v1'
+  ROLES = ('ref_A', 'eval_A', 'ref_B', 'eval_B')
+  STAGES = ('raw', 'center_median', 'scale_median_iqr', 'center_mean', 'scale_mean_sd')
+  SCALE_FLOOR = 1e-12
+  AUDIT_REPEATS = 3
+  DIST4 = ('marginal_w1', 'median_mae', 'iqr_mae', 'tail_mae')
+  ENERGY_METRICS = (*DIST4, 'joint_energy')
+  CORR_METRICS = ('pearson_corr_rmse', 'spearman_corr_rmse')
+  ```
+
+  quarters_for_ids:
+
+  ```python
+  def quarters_for_ids(ids, repeat):
+      ids = [str(s) for s in ids]
+      n = len(ids)
+      if n == 0 or n % 4:
+          raise ValueError('Sample count must be positive and divisible by four.')
+      if len(set(ids)) != n:
+          raise ValueError('Duplicate sample IDs are not allowed.')
+      keys = [hashlib.sha256(f'{SPLIT_SALT}|{repeat}|{s}'.encode()).hexdigest() for s in ids]
+      order = np.argsort(keys, kind='stable')
+      quarters = {}
+      for rank, idx in enumerate(order):
+          quarters.setdefault(ROLES[rank % 4], []).append(int(idx))
+      return {role: np.asarray(ix, dtype=int) for role, ix in quarters.items()}
+  ```
+
+  argsort on hex strings: np.argsort works on string arrays (lexicographic) — deterministic, order-invariant. Good.
+
+  fit_reference:
+
+  ```python
+  def fit_reference(ref):
+      ref = np.asarray(ref, dtype=float)
+      if ref.ndim != 2 or len(ref) < 2 or not np.isfinite(ref).all():
+          raise ValueError('Reference matrix must be 2D, finite, with at least two rows.')
+      q25, q75 = np.quantile(ref, [.25, .75], axis=0)
+      return {'median': np.median(ref, axis=0), 'iqr': q75 - q25,
+              'mean': ref.mean(axis=0), 'sd': ref.std(axis=0)}
+  ```
+
+  transform_eval:
+
+  ```python
+  def transform_eval(eval_x, params, branch):
+      x = np.asarray(eval_x, dtype=float)
+      if x.ndim != 2 or not np.isfinite(x).all():
+          raise ValueError('Evaluation matrix must be 2D and finite.')
+      if branch == 'raw':
+          return x
+      if branch not in STAGES:
+          raise ValueError(f'Unknown branch: {branch}')
+      loc_key = 'median' if 'median' in branch else 'mean'
+      out = x - np.asarray(params[loc_key], dtype=float)
+      if branch.startswith('scale'):
+          scale_key = 'iqr' if 'iqr' in branch else 'sd'
+          scale = np.asarray(params[scale_key], dtype=float)
+          bad = int((scale <= SCALE_FLOOR).sum())
+          if bad:
+              raise ValueError(f'Reference {scale_key} has {bad} nonpositive/near-zero (<=1e-12) bands; refusing to floor or divide.')
+          out = out / scale
+      return out
+  ```
+
+  'median' in 'center_median' → True; 'mean' in 'center_mean' → True; 'scale_median_iqr' contains 'median' → loc median. Good.
+
+  eval_descriptor:
+
+  ```python
+  def eval_descriptor(x, corr=None):
+      x = np.asarray(x, dtype=float)
+      if x.ndim != 2 or not np.isfinite(x).all() or np.any(x.std(axis=0) <= SCALE_FLOOR):
+          raise ValueError('Evaluation descriptor requires finite, nondegenerate per-band variation.')
+      q = np.quantile(x, [.05, .25, .5, .75, .95], axis=0)
+      d = {'sorted': np.sort(x, axis=0), 'median': q[2], 'iqr': q[3]-q[1], 'tails': q[[0,4]]}
+      if corr is None:
+          upper = np.triu_indices(x.shape[1], 1)
+          d['pearson'] = np.corrcoef(x, rowvar=False)[upper]
+          d['spearman'] = np.corrcoef(stats.rankdata(x, axis=0), rowvar=False)[upper]
+      else:
+          d['pearson'], d['spearman'] = corr
+      return d
+  ```
+
+  joint_energy_v:
+
+  ```python
+  def joint_energy_v(x, y):
+      x = np.atleast_2d(np.asarray(x, dtype=float)); y = ...
+      if x.ndim != 2 or y.ndim != 2 or x.shape[1] != y.shape[1]:
+          raise ValueError
+      if not finite... 
+      n, m = len(x), len(y)
+      if n < 2 or m < 2: raise
+      scale = np.sqrt(x.shape[1])
+      dxy = cdist(x, y) / scale
+      dxx = pdist(x) / scale
+      dyy = pdist(y) / scale
+      return float(2*dxy.sum()/(n*m) - 2*dxx.sum()/(n*n) - 2*dyy.sum()/(m*m))
+  ```
+
+  Note: joint_energy_v imported into tests.
+
+  correlations helper for audit:
+
+  ```python
+  def correlation_vectors(x):
+      upper = np.triu_indices(x.shape[1], 1)
+      return (np.corrcoef(x, rowvar=False)[upper],
+              np.corrcoef(stats.rankdata(x, axis=0), rowvar=False)[upper])
+  ```
+
+  validate_reproducibility_run as planned.
+
+  run() as planned.
+
+  Now think about within rows storage of corr metrics: within row dict:
+
+  ```python
+  row = {'source':source,'component':component,'branch':branch,'repeat':repeat, **{m: value[m] for m in DIST4}, 'joint_energy': e}
+  if branch == 'raw':
+      row.update({m: value[m] for m in CORR_METRICS})
+      row['pearson_pattern_r'] = value['pearson_pattern_r']; ...
+  within_rows.append(row)
+  ```
+
+  compare returns pearson_corr_rmse, spearman_corr_rmse, pearson_pattern_r, spearman_pattern_r.
+
+  between row:
+
+  ```python
+  cross_vals = {m: [] for m in ENERGY_METRICS}
+  comps = [(dA[sa], dA[sb]), (dA[sa], dB[sb]), (dB[sa], dA[sb]), (dB[sa], dB[sb])]
+  pairs_y = [(yA[sa], yA[sb]), (yA[sa], yB[sb]), (yB[sa], yA[sb]), (yB[sa], yB[sb])]
+  for (da, db), (xa, xb) in zip(comps, pairs_y):
+      c = compare(da, db)
+      for m in ENERGY_METRICS:
+          cross_vals[m].append(c[m] if m != 'joint_energy' else joint_energy_v(xa, xb))
+  row = {'pair': f'{sa} / {sb}', 'source_a': sa, 'source_b': sb, 'component': component, 'branch': branch, 'repeat': repeat}
+  for m in ENERGY_METRICS:
+      cross = float(np.mean(cross_vals[m]))
+      base = (within_store[(sa, repeat, branch)][m] + within_store[(sb, repeat, branch)][m]) / 2
+      if base <= SCALE_FLOOR: raise ValueError('Near-zero within distance; refusing ratio.')
+      row[f'{m}_cross'] = cross; row[f'{m}_within'] = base; row[f'{m}_ratio'] = cross/base
+  if branch == 'raw':
+      # correlation rmse ratios using the 4 cross compares
+  ```
+
+  For corr metrics cross on raw: cross c4 = mean of compare corr rmse over the 4 compares; within base = mean of within corr rmse of the two sources; ratio. Need within corr rmse stored in within_store for raw: include corr metrics in within_store dict when raw.
+
+  within_store[(source, repeat, branch)] = value dict (compare outputs) + joint_energy.
+
+  Audit collection:
+
+  ```python
+  if branch != 'raw' and repeat < AUDIT_REPEATS:
+      for source in SOURCES:
+          pa, sa_ = correlation_vectors(yA[source]); pb, sb_ = correlation_vectors(yB[source])
+          ra = raw_corr[source]  # dict with pearson_A etc from raw stage
+          d = max(float(np.max(np.abs(pa - ra['pearson_A']))), float(np.max(np.abs(pb - ra['pearson_B']))))
+          ...
+          audit[(source, component, branch)] update max
+  ```
+
+  raw_corr[source] = {'pearson_A': dA['pearson'], 'spearman_A':..., 'pearson_B':..., 'spearman_B':...} stored during raw stage; keyed per repeat (reset each repeat).
+
+  Audit rows final: source, component, stage, max_abs_pearson_diff, max_abs_spearman_diff; raw rows → 0.0.
+
+  Summaries and outputs as planned.
+
+  Now figures functions take pair_summary.
+
+  Report: write function report(output, source_summary, pair_summary, within, between). Dynamic.
+
+  Time to write the actual files. Also mind: manifest written before computation includes comparisons formulas etc.
+
+  Let me also double check `summarize` import usage: summarize(within_df, ['source','component','branch'], metrics). Good.
+
+  pair_summary construction:
+
+  ```python
+  ratio_cols = [f'{m}_{suffix}' for m in ENERGY_METRICS for suffix in ('cross','within','ratio')]
+  pair_summary = summarize(between_df, ['pair','component','branch'], ratio_cols)
+  raw_between = between_df[between_df.branch == 'raw']
+  corr_cols = [f'{m}_{suffix}' for m in CORR_METRICS for suffix in ('cross','within','ratio')]
+  corr_summary = summarize(raw_between, ['pair','component'], corr_cols)
+  corr_summary['branch'] = 'raw'
+  pair_summary = pair_summary.merge(corr_summary, on=['pair','component','branch'], how='left')
+  ```
+
+  Order columns? fine.
+
+  source_summary similar with metrics DIST4+joint_energy, corr summary on raw within subset with pattern_r included.
+
+  Report tables for normal:
+
+  ```python
+  normal = pair_summary[pair_summary.component=='normal']
+  stages_display = STAGES
+  lines table: | pair | raw | center_median | scale_median_iqr | center_mean | scale_mean_sd |
+  for metric in ('marginal_w1','joint_energy'): separate tables.
+  ```
+
+  Also maybe show absolute cross/within medians? The contract says retain numerator and denominator separately — they're in CSV; report can note where.
+
+  Also include short within-baseline (source internal) normal table? "within-baseline interpretation" — paragraph suffices.
+
+  Full-component summaries:
+
+  ```python
+  for component in COMPONENTS:
+      sub = pair_summary[pair_summary.component==component]
+      for branch in ('raw','scale_median_iqr'):
+          rng = sub[f'marginal_w1_ratio_median'] range...
+      lines.append(f'- {component}：...')
+  ```
+
+  OK writing now. Also CLI main with threadpool_limits(1).
+
+  One more: `write_json` with allow_nan=False — ensure no NaN in manifest (none).
+
+  Test list (6 required + extras). Write ~10 tests.
+
+  Energy test vs direct formula: compute explicit:
+
+  ```python
+  def direct_v(x, y):
+      n, m = len(x), len(y)
+      dxy = np.mean([[np.linalg.norm(a-b) for b in y] for a in x])
+      ...
+  ```
+
+  Simpler direct: build full matrices:
+
+  ```python
+  Dxy = np.sqrt(((x[:,None,:]-y[None,:,:])**2).sum(-1))
+  Dxx = np.sqrt(((x[:,None,:]-x[None,:,:])**2).sum(-1))
+  Dyy = ...
+  v = 2*Dxy.mean() - Dxx.mean() - Dyy.mean()
+  ```
+
+  assert close to joint_energy_v.
+
+  scipy: stats.energy_distance(x1d, y1d)**2 close.
+
+  W1-zero test: 
+
+  ```python
+  rng = np.random.default_rng(7)
+  x = rng.normal(size=(24, 3))
+  perm = rng.permutation(24)
+  y = x[perm]
+  w1 = np.mean(np.abs(np.sort(x,0) - np.sort(y,0)))
+  assert w1 == 0
+  e = joint_energy_v(x, y)
+  assert e > 1e-8
+  ```
+
+  Wait joint energy with y a row permutation of x: dXX and dYY identical; dXY differs. V > 0 unless points arranged identically. With random normal and derangement, definitely > 0. Also note W1 here is per-coordinate sorted diff; use module's eval_descriptor/compare? To use independent formula, direct sorted mean is exactly the definition; fine.
+
+  Affine removal test:
+
+  ```python
+  rng = np.random.default_rng(3)
+  ref = rng.normal(size=(32, 6))
+  ev = rng.normal(size=(32, 6))
+  shift = rng.normal(size=6) * 3
+  scale = rng.uniform(0.5, 3.0, size=6)
+  ref_t = ref * scale + shift
+  ev_t = ev * scale + shift
+  for branch, key_loc, key_sc in (('scale_median_iqr','median','iqr'), ('scale_mean_sd','mean','sd')):
+      params = fit_reference(ref_t)
+      z = transform_eval(ev_t, params, branch)
+      expected = (ev - getattr? ) 
+  ```
+
+  For scale_median_iqr: expected = (ev - np.median(ref,0))/ (iqr(ref)). For scale_mean_sd: (ev - ref.mean(0))/ref.std(0). Assert allclose.
+
+  center_median: expected = ev + (np.median(ref,0) - np.median(ref_t,0))? center_median of ev_t = ev_t - median(ref_t) = ev*scale + shift - (median(ref)*scale+shift) = (ev - median(ref))*scale. So expected = (ev - np.median(ref,0))*scale. Assert. center_mean similar with mean.
+
+  Also test raw returns identical values.
+
+  "changing eval cannot alter reference parameters": after transform with a different eval matrix, assert np.array_equal(params['median'], before) etc. Also check fit_reference signature has single parameter:
+
+  ```python
+  import inspect
+  assert len(inspect.signature(fit_reference).parameters) == 1
+  ```
+
+  Degenerate: ref with one constant column: iqr=0 → scale_median_iqr raises; sd=0 → raises; near-zero 5e-13 raises. fit_reference itself shouldn't raise (only transform). Test that.
+
+  quarters tests: count divisible: 8 ids → sizes 2; completeness; disjointness; order invariance: shuffled input yields same role per id (compare dict id->role for original vs shuffled); duplicates raise; 6 ids raise; also different repeats give different assignments (not strictly required but fine — avoid flakiness: with 16 ids and hash sort, repeats 0/1 virtually surely differ; deterministic anyway, but to be safe just check roles sets equal sizes; skip cross-repeat inequality? Task test 1 only requires disjoint/complete/equal/order-invariant. I'll include repeat-0 vs repeat-1 differ with 16 ids — deterministic given fixed salt; if it fails we'd know; it's deterministic so no flakiness. Keep but with a comment. Actually leave it out to avoid asserting unspecified behavior. I'll include it — deterministic and virtually certain. Fine, keep.)
+
+  Correlation invariance test: random x 40×5; scale positive; shift; pearson via np.corrcoef rowvar=False allclose; spearman via stats.spearmanr? Use rankdata+corrcoef (same as impl — "merely mirror implementation"? Test 3 asks Pearson/Spearman eval correlation matrices invariant — asserting equality of corrcoef(x) vs corrcoef(transformed) IS the property; implementation uses corrcoef too but the property is mathematical. To be more independent, compute pearson also via np.corrcoef (same) — acceptable; or compute one via stats.pearsonr pairwise. I'll use np.corrcoef for Pearson and scipy stats.rankdata-free approach: compute spearman via pd.DataFrame(x).corr(method='spearman') — independent implementation from pandas. Good.)
+
+  Nonfinite eval rejected test.
+
+  Now — the main script's eval_descriptor for raw uses describe() from helper instead of eval_descriptor? I'll use eval_descriptor everywhere for consistency, and use describe() in the audit spot-check (satisfies import + genuine use). compare imported and used. summarize used.
+
+  Alright, also need json import in main for reading status (validate_reproducibility_run). And hashlib for quarters.
+
+  Let me write the files now.
+
+  Report writing function — build with f-strings from dataframes; ensure no NaN formatted (corr summary merge yields NaN for non-raw rows but report only uses raw/branch rows for normal tables from pair_summary where columns exist for all branches for the 5 metrics — fine).
+
+  Careful: pair_summary for normal tables: filter component=='normal'; index by (pair, branch) via set_index(['pair','branch']).loc[(pair, branch)].
+
+  Pairs order: [f'{a} / {b}' for a, b in combinations(SOURCES, 2)].
+
+  Now write. Also add module docstring and comments in English (codebase style English, report Chinese).
+
+  Also progress: after all, print normal pair summary snippet.
+
+  Let me write source_signed_residual_location_scale.py.
+
+• I left a leftover placeholder loop bug in the cross section:
+
+  ```python
+              for sa, sb in combinations(SOURCES, 2):
+                  cross_vals = {m: [] for m in ENERGY_METRICS}
+                  corr_cross = {m: [] for m in CORR_METRICS}
+                  for branch in STAGES:
+                      del cross_vals  # rebuilt below per branch; placeholder to keep structure clear
+                      break
+                  for branch in STAGES:
+  ```
+
+  This is ugly and buggy (`del cross_vals` then break — works but horrible). Clean it up.Also there's an issue: `within_store` is computed as `{r['source'], r['branch']): r for r in within_rows if r['repeat'] == repeat}` — within_rows grows across components, and repeats repeat per component (repeat 0..199 for each component). Filtering by repeat == repeat would pull in rows from earlier components with the same repeat number! Bug. within_store should only use rows appended in the current component/repeat. Since the within loop appends rows for the current repeat just before the between loop, filtering `within_rows` by repeat picks up old components' rows too — dict comprehension keyed by (source, branch) would be overwritten by later rows in the list (same repeat, earlier component comes first, current component later → later wins since dict comprehension keeps last). Actually dict comprehension: for duplicate keys, last occurrence wins. Current component rows are appended after previous components' rows with the same repeat, so they win. It works by luck but is fragile and O(n²)-ish. Better: build within_store directly in the within loop.
+
+  Let me fix: maintain `within_store = {}` per repeat; in the within loop, after computing row, store `within_store[(source, branch)] = row`. Also we don't need value stored separately. Let me restructure that section.
+
+  Also `raw_corr` is defined per repeat but only used within the same repeat — fine. But note for non-raw branches, eval_descriptor with corr reuse assumes raw ran first in STAGES order — STAGES starts with 'raw'. Good.
+
+  Another issue: `describe(ya)` for raw — describe checks x.std(axis=0) <= 1e-12; fine.
+
+  Also audit: `audit.setdefault((source, component, branch), [0.0, 0.0])` — raw rows not in audit; final audit_rows uses 0.0 for raw and audit[...] otherwise. AUDIT_REPEATS=3 repeats guarantee non-raw branches have entries. Good.
+
+  Also within_store currently: let me rewrite that block.Now check the figure code: `sub.loc[(PAIR_NAMES, [branch] * len(PAIR_NAMES))]` — MultiIndex .loc with tuple of lists: `sub.loc[(list1, list2)]` works for pandas MultiIndex (cross-product selection) as long as the pairs exist in order. Since pairs all have all branches, the result preserves the order of PAIR_NAMES × branch? Actually `.loc[(list_a, list_b)]` selects the cartesian product and returns in sorted index order? It returns in the order of the index, not the lists. Since PAIR_NAMES is already in the index's insertion order (combinations order) and there's one branch, the filtered frame should be in PAIR_NAMES order if the index is sorted lexicographically... MultiIndex from groupby(sort=False) preserves first-appearance order: pairs in combinations order, branches in STAGES order. `.loc[(PAIR_NAMES, [branch])]` — pandas handles tuple-of-lists by reindexing? For MultiIndex, `df.loc[(list1, list2)]` does cross-product selection and I believe the result order follows the lists order in recent pandas (it uses `get_locs` which returns in index order...). Safer to build rows explicitly:
+
+  ```python
+  rows = pd.DataFrame([sub.loc[(pair, branch)] for pair in PAIR_NAMES])
+  ```
+
+  Let me use that — deterministic.Also in report(): `normal = pair_summary[...].set_index(['pair','branch'])` then `normal.loc[(pair, branch)]` — fine.
+
+  One more check: in `run`, `ref_base.copy()` per branch → 5 copies of 384k-row df. Fine.
+
+  `describe(ya)` imported from reproducibility helper — validates. Good.
+
+  Also the print at the end: `pair_summary[(pair_summary.component == 'normal')][cols]` — cols exist. Fine.
+
+  Now check figure title line lengths etc — fine.
+
+  Now the audit: for branch != raw and repeat < AUDIT_REPEATS, we compute `correlation_vectors(y)`. But note raw_corr[source] must exist — raw branch processed first in the branch loop for each source. Yes: branch loop `for branch in STAGES` starts with raw.
+
+  Wait — actually there's a subtle ordering issue: for each source we loop over all branches (inner branch loop inside source loop). raw_corr[source] is set during raw of the same source/repeat. eval_descriptor for non-raw uses raw_corr[source] — set earlier in that source's branch loop. Good.
+
+  Audit `slot = audit.setdefault((source, component, branch), [0.0, 0.0])` — but fresh correlation diff vs raw should be ~1e-15; good.
+
+  Now double-check `report()` — `source_summary` param unused in report; fine (could drop but harmless; actually it's passed and unused — remove to keep clean? Keep signature minimal: drop the param). Let me check the call: `report(output, source_summary, pair_summary)`. I'll simplify to `report(output, pair_summary)`.Now check the diagnostics recording: inside the source loop I have
+
+  ```python
+  for ref_name, params in (('ref_A', params_a), ('ref_B', params_b)):
+      for stat in ('median', 'iqr', 'mean', 'sd'):
+          for row in reference_diagnostics({stat: params[stat]}):
+              diag_records.append(...)
+  ```
+
+  reference_diagnostics({stat: params[stat]}) returns a single-row list for that stat. OK, works but convoluted; fine.
+
+  But wait — diagnostics are recorded per (component, repeat) without branch — but this happens inside the branch-independent section? Let me re-check the loop structure: the source loop computes params and ref_records/diag_records BEFORE the branch loop. Yes — ref records and diagnostics are recorded once per (source, component, repeat), outside the branch loop. Good — that's why there's no branch column in diag records (documented? The diag CSV has no branch column; ref parameters get branch duplicated later). Manifest should note ref params are branch-independent. Let me add a note to the manifest reference_policy. Also report mentions reference_parameters.csv.gz. Add "reference_parameters branch column repeats identical branch-independent values" to manifest.
+
+  Also: `ref_records` band loop uses `params_a['median'].shape[0]` — 80. OK.
+
+  Now also check: within loop branch 'raw' uses `describe(ya)` — describe requires nondegenerate columns; raw eval could have degenerate band? Bank spectra—unlikely; error acceptable.
+
+  Let me view the full run section to double check structure after edits.Structure looks right. One issue: `describe()` from helper returns keys 'sorted','median','iqr','tails','quantiles','pearson','spearman' — compare works. eval_descriptor returns same keys minus quantiles. compare only needs sorted/median/iqr/tails/pearson/spearman. Good.
+
+  Issue: describe() raises if `np.any(x.std(axis=0) <= 1e-12)` — for raw stage, fine.
+
+  Performance consideration: `d_cache`/`y_cache` per repeat holds all sources/branches — fine.
+
+  Potential issue: within `compare`, `np.corrcoef(a[name], b[name])` — correlation vectors constant? No.
+
+  Memory of ref_records: tuples of 10 elements × 384k — fine.
+
+  One more concern: reference_diagnostics called with single-stat dict; works.
+
+  Manifest note about branch-independent params: add a line. Also the diag CSV lacks branch column — contract says "reference_diagnostics.csv" no schema, fine.
+
+  Add to manifest reference_policy: "reference_parameters.csv.gz stores branch-independent per-band parameters once per (source, component, repeat, ref); the branch column marks the consuming stage and values are identical across branches". Let me edit.
+
+• Issues in test file:
+
+  1. `test_nonfinite_inputs_rejected` calls `rng_shift()` before its definition — fine at runtime (defined at module level before test runs). But it's silly; simplify: `params = fit_reference(np.arange(24.0).reshape(8, 3) + 0.5)`. Remove rng_shift.
+
+  2. `compare(describe(x), d)` — compare requires a['sorted'].shape == b['sorted'].shape: describe returns 'sorted' np.sort(x,axis=0) (32×5); eval_descriptor same. pearson vectors identical objects → rmse 0. marginal_w1 = mean abs diff of identical sorted arrays = 0.0 exactly. Good.
+
+  3. In `test_affine_transforms_exactly_removed`: for branch in checks, I assert params unchanged after each transform — good.
+
+  Note `np.allclose(z, expected, rtol=1e-12, atol=1e-12)` — floating error from division: fine.
+
+  Also test for `quarters_for_ids` count 4 with duplicates ['a','b','a','c'] — 4 divisible, duplicates → raises. Good.
+
+  Fix rng_shift.Now let me review the whole main script once more for correctness issues:
+
+  1. Imports: `describe` and `compare` imported; `describe` used at raw stage; `compare` used. Good.
+
+  2. `test_eval_descriptor_reuses_supplied_correlations` uses STAGES import? I imported ROLES, SCALE_FLOOR, STAGES but STAGES/SCALE_FLOOR unused in tests — remove to avoid lint noise? Harmless. Remove STAGES and SCALE_FLOOR from import to be clean. Actually pytest doesn't care. Leave? Minor. I'll trim.
+
+  3. In main script: `audit` — for components other than first, `audit` keys include component so separate. Good.
+
+  4. In `run`, final print columns: `pair_summary[(pair_summary.component == 'normal')][cols]` — cols exist in pair_summary (ratio_cols). Good.
+
+  5. `validate_reproducibility_run` sorts artifacts. Good.
+
+  6. `write_json` allow_nan=False — manifest has no NaN. status.json artifact dict fine.
+
+  7. Figure: `sub = pair_summary[...].set_index(['pair','branch'])` — pair_summary from summarize has columns pair, component, branch + metric columns. Good.
+
+  8. Report: `normal.loc[(pair, branch)]` — Series; ratio_cell uses row[f'...'] indexing — Series supports. Good.
+
+  9. Potential pandas FutureWarning: `sub.loc[(pair, branch)]` fine.
+
+  10. `make_figures` uses `np.arange(6)+(k-1)*.21` with 6 pairs — good.
+
+  Now double-check test for energy vs scipy: scipy.stats.energy_distance(x1, y1) — univariate arrays; squared equals our V with diagonal-included means? scipy's energy_distance for unweighted case: computes via `_cdf_distance`? Let me recall actual scipy source (scipy/stats/_stats_py.py):
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights=None, v_weights=None):
+      if u_weights is not None or v_weights is not None:
+          u_values, u_weights = _validate_distribution(...)
+          ...
+          # weighted case
+          uv, uu, vv = _cdf_distance_weighted(1, ...)?? 
+          return np.sqrt(2*uv - uu - vv)
+      else:
+          u_values = np.asarray(u_values)
+          v_values = np.asarray(v_values)
+          # multivariate case? energy_distance supports multivariate via cdist:
+          ...
+  ```
+
+  From scipy docs (1.11+): energy_distance computes `sqrt(2 * E|X-Y| - E|X-X'| - E|Y-Y'|)`. Implementation for the unweighted case uses cdist on row vectors:
+
+  ```python
+      else:
+          u_values = np.asarray(u_values, dtype=float)
+          v_values = np.asarray(v_values, dtype=float)
+          if u_values.ndim == 1: ... reshape?
+  ```
+
+  Actually the current scipy implementation:
+
+  ```python
+  def energy_distance(u_values, v_values, u_weights=None, v_weights=None):
+      ...
+      if u_weights is None and v_weights is None:
+          u_values = np.asarray(u_values)
+          v_values = np.asarray(v_values)
+          # energy distance for unweighted samples: D = sqrt(2 E|X-Y| - E|X-X'| - E|Y-Y'|)
+          d = cdist(u_values, v_values)  # wait no
+  ```
+
+  I recall there's a known equivalence: scipy's energy_distance returns sqrt of the V-statistic (biased, with diagonal). The task explicitly states test should match "one-dimensional scipy.stats.energy_distance squared", so the intended identity is V = energy_distance². Since the task authors asserted it, trust it. With equal/unequal sample sizes, scipy's implementation for unweighted uses cdist means over full matrices (including diagonal), which matches our diagonal-included means. Good.
+
+  Test uses x1 (25), y1 (25) different sizes? Same size 25. Our formula handles unequal too. Fine.
+
+  11. Check `test_zero_marginal_w1_with_positive_joint_energy`: y = x[perm] with random permutation from rng.permutation(32) — might have fixed points but pairs differ somewhere; joint_energy > 0 unless x rows identical. Random normals → fine.
+
+  12. In main: STAGES order in report table headers matches STAGES. Good.
+
+  13. One subtle thing: `transform_eval` returns `x` unchanged for raw but `x = np.asarray(eval_x, dtype=float)` may alias caller's array — fine.
+
+  14. `quarters_for_ids` np.argsort on list of hex strings — np.argsort(['ab', 'cd']) works (dtype '<U64'). kind='stable' fine.
+
+  15. Repro path: REPRO dir contains status.json + artifacts listed in status['artifacts'] (files in that dir). In reproducibility script, artifacts dict = {p.name: sha256(p) for p in output.iterdir() if p.is_file()} — includes protocol_manifest.json, all CSVs, npz, pngs, report.md. We re-hash each. Good.
+
+  16. `load_bank` inputs keys: str(p) absolute paths of parent artifacts + prior artifacts + status files. In final reverification loop `sha256(path)` where path is str — sha256 handles str via Path(path). Good.
+
+  17. Memory: within_rows 12000 dicts; between_rows 18000 dicts with ~20 floats — fine.
+
+  18. ref_records 384k tuples × 10 — ~ tens of MB, fine. concat 5 copies → 1.92M rows df (~150MB transient) → CSV gz. Acceptable.
+
+  Runtime: raw describes: 4800 × (sort + 2 corrcoef 80×80) fine. Total compare calls 84k; each compare does corrcoef of 3160-vectors etc. ~fine.
+
+  Now trim unused imports in test file. Also double check `pd` import used (yes), `stats` used (energy_distance), `cdist` used. `STAGES`, `SCALE_FLOOR` unused — remove from import list.
+
+• Continue: final review of the main script (lines 1-300 remaining unchecked parts, particularly quarters/transform and figures/report) to verify no bugs. Let me read the rest of the main file quickly (lines 1-300 partially seen; I've seen 300-429). Let me read 1-300 briefly to double check.One issue in `make_figures`: `pd.DataFrame([sub.loc[(pair, branch)] for pair in PAIR_NAMES])` — sub.loc[(pair, branch)] returns a Series; list of Series → DataFrame with columns = union; metric columns exist. Good.
+
+  Another: in report, unused `zh` var in the tuple loop — harmless.
+
+  Potential issue in figures: pair_summary merged with corr columns; no NaN for the 5 metrics. Good.
+
+  Potential pandas issue: `sub.loc[(pair, branch)]` where sub index is (pair, branch) — pair contains ' / ' e.g. 'Lopex / Angers' — fine as label.
+
+  `axes` loop: axes[0].legend with title — fine.
+
+  One more check in run: printed progress is keyed (component, branch) — prints 15 times. Good.
+
+  Check end of file (lines 429-493) already seen mostly. The final print uses pair_summary columns — fine.
+
+  Also check the earlier part of file lines 1-160 — I've seen via Write. Fine.
+
+  One concern: in run, for `component` loop, `xs = {s: blocks(...)}` — bank[source][component] is (128,2000); blocks → (128,80). Good.
+
+  Check describe() usage: describe returns dict with 'quantiles' too; compare only uses needed keys. For raw branch, da = describe(ya); d_cache stores da which includes quantiles (extra memory, small).
+
+  Also note: eval_descriptor doesn't include 'quantiles' — compare doesn't need it. Good.
+
+  Test file check on `test_eval_descriptor_reuses_supplied_correlations`: `compare(describe(x), d)` — describe(x) keys superset; compare accesses a['sorted'] etc. Both identical arrays → marginal_w1 = 0.0 exactly; pearson_corr_rmse = 0.0. Note: compare also computes pattern_r via np.corrcoef of identical vectors → 1.0, fine, not asserted.
+
+  Edge: `np.corrcoef` on constant correlation vector would give NaN, but not here.
+
+  One more possible issue: in test `test_affine_transforms_exactly_removed`, expected for scale_median_iqr uses ref (not ref_t) stats — correct because transform should recover ev. z = (ev_t - median(ref_t))/iqr(ref_t). median(ref_t) = scale*median(ref)+shift; iqr(ref_t) = scale*iqr(ref). z = (ev*scale+shift - scale*median(ref)-shift)/(scale*iqr(ref)) = (ev-median(ref))/iqr(ref). Exact in exact arithmetic; float rounding ~1e-16 — tolerance 1e-12 fine.
+
+  center_median: z = ev_t - median(ref_t) = scale*(ev - median(ref)). Expected matches.
+
+  Now, the module imports `describe` — used. All good.
+
+  Also confirm no commands executed — we only wrote files. Now write the handoff in Chinese (task asks "Return a compressed handoff in Chinese"). The delegated instruction says handoff must use sections: Conclusion, Changed Files, Key Decisions, Tests, Risks, Recommended Verification. Task says handoff in Chinese with file/line references. I'll write sections in Chinese (keeping section headers as specified, maybe bilingual). Keep under 8000 chars.
+
+To resume this session: kimi -r session_5e91b4f0-1379-41f7-9489-005af5a31d57
