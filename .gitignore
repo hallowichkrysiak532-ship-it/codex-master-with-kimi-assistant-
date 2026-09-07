@@ -17,9 +17,6 @@ venv/
 .agent_runtime/ledger.csv
 
 # Workspace inputs and generated outputs are local by default
-workspace/papers/*
-workspace/repos/*
-workspace/notes/*
 outputs/reports/*
 outputs/summaries/*
 workspace/
